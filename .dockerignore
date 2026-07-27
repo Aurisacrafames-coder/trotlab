@@ -1,0 +1,15 @@
+node_modules
+dist
+data
+.git
+.gitignore
+*.db
+*.db-*
+.env
+.env.*
+terminals
+.cursor
+README.md
+Dockerfile
+fly.toml
+.dockerignore

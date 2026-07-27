@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/vite-env.d.ts","./src/pages/gamepage.tsx","./src/pages/homepage.tsx","./src/pages/importpage.tsx","./src/pages/racepage.tsx","./src/pages/settingspage.tsx","./src/pages/statspage.tsx","./src/pages/systempage.tsx"],"version":"5.9.3"}

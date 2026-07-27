@@ -1,0 +1,42 @@
+{
+  "name": "travkalkyl",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:client": "vite --host",
+    "dev:server": "tsx watch server/index.ts",
+    "build": "tsc -b && vite build",
+    "start": "tsx server/index.ts",
+    "mobile": "npm run build && npm start",
+    "share": "npm run build && concurrently -k -n app,tunnel -c blue,magenta \"npm run start\" \"tsx server/scripts/tunnel.ts\"",
+    "tunnel": "tsx server/scripts/tunnel.ts",
+    "preview": "vite preview --host",
+    "check:deploy": "node scripts/check-deploy-env.cjs",
+    "import:lindesberg": "tsx server/scripts/importLindesberg2026.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.1.1",
+    "tsx": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.6"
+  }
+}
