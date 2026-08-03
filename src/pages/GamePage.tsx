@@ -176,6 +176,12 @@ function LegRaceInfo({ leg }: { leg: GameSessionLeg }) {
 
 
 
+function isWatchedPick(
+  pick: { startNumber: number; horseName: string; trotScore: number; isWatched?: boolean },
+): boolean {
+  return pick.isWatched === true;
+}
+
 function LegSystemHint({ leg }: { leg: GameSessionLeg }) {
   const sys = leg.systemSuggestion;
   if (!sys) return null;
@@ -198,8 +204,23 @@ function LegSystemHint({ leg }: { leg: GameSessionLeg }) {
 
       <div className="leg-system-picks">
         {picks.map((p) => (
-          <span key={p.startNumber} className="leg-system-pick">
-            #{p.startNumber} {p.horseName}{' '}
+          <span
+            key={p.startNumber}
+            className={[
+              'leg-system-pick',
+              isWatchedPick(p) ? 'leg-system-pick-watched' : '',
+              'scratched' in p && p.scratched ? 'leg-system-pick-scratched' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+          >
+            {isWatchedPick(p) && !('scratched' in p && p.scratched) && (
+              <span className="watch-indicator" title="Bevakad häst">★ </span>
+            )}
+            #{p.startNumber}{' '}
+            <span className={'scratched' in p && p.scratched ? 'horse-name-scratched' : undefined}>
+              {p.horseName}
+            </span>{' '}
             <span className="score-cell">{p.trotScore.toFixed(1)}</span>
           </span>
         ))}
@@ -612,16 +633,38 @@ export default function GamePage() {
                 className="secondary"
 
                 onClick={() =>
-
-                  runAction(() => recalculateGame(game.id), 'Omgång omräknad med globala vikter.')
-
+                  runAction(
+                    () => recalculateGame(game.id, false),
+                    `Omgång omräknad med ${game.trackName}-profil.`,
+                  )
                 }
 
                 disabled={busy}
 
               >
 
-                Räkna om alla
+                Räkna om med banprofil
+
+              </button>
+
+              <button
+
+                type="button"
+
+                className="secondary"
+
+                onClick={() =>
+                  runAction(
+                    () => recalculateGame(game.id, true),
+                    'Omgång omräknad med global standard.',
+                  )
+                }
+
+                disabled={busy}
+
+              >
+
+                Räkna om med global standard
 
               </button>
 
@@ -768,6 +811,10 @@ export default function GamePage() {
                   <div className="game-leg-score-row">
 
                     <span>
+
+                      {leg.rankedHorses.some((h) => h.isWatched) && (
+                        <span className="watch-indicator" title="Bevakad häst i loppet">★ </span>
+                      )}
 
                       Topp: {leg.topStartNumber != null && `#${leg.topStartNumber} `}
 

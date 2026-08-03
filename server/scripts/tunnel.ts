@@ -44,6 +44,7 @@ function watchForPublicUrl(text: string) {
   console.log('  Dela denna länk (fungerar var som helst):');
   console.log(`  ${url}`);
   console.log('════════════════════════════════════════');
+  console.log(`  Lokalt på denna dator: http://localhost:${PORT}`);
   console.log('  Länken gäller tills du stänger terminalen.\n');
 }
 
@@ -67,6 +68,10 @@ async function main() {
     const text = buf.toString();
     process.stderr.write(text);
     watchForPublicUrl(text);
+    if (text.includes('Registered tunnel connection')) {
+      console.log('\n✓ Tunnel aktiv — väntar på besökare. Stäng inte terminalen.');
+      console.log(`  Lokalt på denna dator: http://localhost:${PORT}\n`);
+    }
   });
 
   tunnel.on('exit', (code) => {

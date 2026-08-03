@@ -5,7 +5,9 @@ import {
   discoverTrackLegsForRange,
 } from '../importService.js';
 import { scheduleAutoOptimize } from './autoOptimize.js';
-import type { BulkImportStatus } from '../shared/types.js';
+import { getTrackStats } from '../trackStats.js';
+import type { BulkImportStatus } from '../../shared/types.js';
+import { BULK_IMPORT_LOOKBACK_MONTHS } from '../../shared/types.js';
 
 const META_KEY = 'bulk_import_status';
 
@@ -125,7 +127,11 @@ async function runBulkImport(
     };
     saveStatus(db, liveStatus);
 
-    scheduleAutoOptimize(db);
+    // Skip auto-optimize after large bulk imports — it blocks the server for minutes.
+    const trackStats = getTrackStats(db, options.atgTrackId);
+    if (trackStats && trackStats.racesWithResult <= 150) {
+      scheduleAutoOptimize(db, 'win', options.atgTrackId);
+    }
   } catch (err) {
     liveStatus = {
       ...liveStatus,
@@ -141,7 +147,7 @@ export function scheduleBulkImport(
   db: Database.Database,
   options: { atgTrackId: number; trackSlug: string; trackName: string; months?: number },
 ) {
-  const request = { ...options, months: options.months ?? 6 };
+  const request = { ...options, months: options.months ?? BULK_IMPORT_LOOKBACK_MONTHS };
 
   if (importPromise) {
     queuedRequest = request;

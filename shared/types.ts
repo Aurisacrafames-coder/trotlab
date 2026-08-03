@@ -17,6 +17,7 @@ export interface FormStart {
   postPosition: number | null;
   kmTime: string | null;
   place: string | null;
+  isRecordTime?: boolean;
   driverName: string | null;
   prizeFirst: number | null;
   trackName: string | null;
@@ -37,11 +38,19 @@ export interface RaceEntry {
   driverApprentice: boolean;
   startPoints: number | null;
   earningsPerStart: number | null;
-  driverV85WinPct: number | null;
+  driverTrackWinPct: number | null;
+  driverGlobalWinPct: number | null;
+  driverV85WinPctOverride: number | null;
+  atgTrainerId: number | null;
+  trainerName: string | null;
+  trainerWinPct: number | null;
+  trainerWinPctOverride: number | null;
   betDistributionPct: number | null;
   trackPostWinPct: number | null;
   trotScore: number | null;
   actualPosition: number | null;
+  scratched?: boolean;
+  isWatched?: boolean;
   formStarts: FormStart[];
   scores: Record<string, number>;
 }
@@ -92,7 +101,13 @@ export interface GameSessionLeg {
   status: string | null;
   raceInfo: RaceLegInfo | null;
   systemSuggestion: SystemLegSuggestion | null;
-  rankedHorses: Array<{ startNumber: number; horseName: string; trotScore: number }>;
+  rankedHorses: Array<{
+    startNumber: number;
+    horseName: string;
+    trotScore: number;
+    isWatched?: boolean;
+    scratched?: boolean;
+  }>;
   topStartNumber: number | null;
   topHorseName: string | null;
   topScore: number | null;
@@ -140,6 +155,8 @@ export interface GameSession {
   legs: GameSessionLeg[];
 }
 
+export type ScoringProfileSource = 'tip' | 'track' | 'global';
+
 export interface RaceSession {
   id: number;
   gameSessionId: number | null;
@@ -161,6 +178,7 @@ export interface RaceSession {
   status: string | null;
   tipSubmittedAt: string | null;
   usesTipParameters: boolean;
+  scoringProfileSource: ScoringProfileSource;
   tipParameters: Parameter[] | null;
   scoringParameters: Parameter[];
   entries: RaceEntry[];
@@ -176,6 +194,9 @@ export interface StatsSummary {
 }
 
 export type BacktestGoal = 'win' | 'top3';
+
+/** Default optimization/backtest goal — vinstträff in top 3 picks. */
+export const DEFAULT_BACKTEST_GOAL: BacktestGoal = 'win';
 
 export interface BacktestTrackOption {
   atgTrackId: number;
@@ -224,7 +245,19 @@ export interface BacktestOptimizeResult {
   hitsGained: number;
   improved: boolean;
   message: string | null;
+  trialsRun: number;
+  maxTrials: number;
 }
+
+/** Default number of weight combinations to try during optimization. */
+export const OPTIMIZE_TRIALS_DEFAULT = 5000;
+
+export const OPTIMIZE_TRIAL_OPTIONS = [
+  { value: 5000, label: 'Standard — 5 000 försök', hint: 'Snabbast, ca 1–3 min' },
+  { value: 10000, label: 'Utökad — 10 000 försök', hint: 'Ca 2–6 min' },
+  { value: 25000, label: 'Grundlig — 25 000 försök', hint: 'Ca 5–15 min' },
+  { value: 50000, label: 'Djup — 50 000 försök', hint: 'Kan ta 15–30+ min' },
+] as const;
 
 export interface AutoOptimizerStatus {
   running: boolean;
@@ -254,6 +287,9 @@ export interface TrackProfileSummary {
   racesWithResult: number;
 }
 
+/** How far back bulk track import fetches finished races for backtest/optimization. */
+export const BULK_IMPORT_LOOKBACK_MONTHS = 18;
+
 export interface BulkImportStatus {
   running: boolean;
   atgTrackId: number | null;
@@ -276,14 +312,27 @@ export interface ParsedAtgUrl {
   leg: number;
 }
 
+export function mergeTrackParameterWeights(
+  trackParams: Parameter[],
+  globalParams: Parameter[],
+): Parameter[] {
+  const trackById = new Map(trackParams.map((p) => [p.id, p]));
+  return globalParams.map((global) => {
+    const track = trackById.get(global.id);
+    return track ? { ...global, weight: track.weight } : global;
+  });
+}
+
 export const DEFAULT_PARAMETERS: Omit<Parameter, 'id'>[] = [
   { name: 'Startpoäng', weight: 25, minScore: 0, maxScore: 10, sortOrder: 0, autoKey: 'startPoints' },
   { name: 'Kr/start', weight: 15, minScore: 0, maxScore: 10, sortOrder: 1, autoKey: 'earningsPerStart' },
   { name: 'Form (placering)', weight: 30, minScore: 0, maxScore: 10, sortOrder: 2, autoKey: 'formPlace' },
   { name: 'Spår', weight: 15, minScore: 0, maxScore: 10, sortOrder: 3, autoKey: 'trackPostWin' },
   { name: 'Kusk vinst%', weight: 10, minScore: 0, maxScore: 10, sortOrder: 4, autoKey: 'driverV85Win' },
-  { name: 'Vinst senaste start', weight: 0, minScore: 0, maxScore: 10, sortOrder: 5, autoKey: 'recentWin' },
-  { name: 'Värmning', weight: 0, minScore: 0, maxScore: 10, sortOrder: 6, autoKey: null },
+  { name: 'Tränare vinst%', weight: 0, minScore: 0, maxScore: 10, sortOrder: 5, autoKey: 'trainerWin' },
+  { name: 'Vinst senaste start', weight: 0, minScore: 0, maxScore: 10, sortOrder: 6, autoKey: 'recentWin' },
+  { name: 'Startstraff', weight: 0, minScore: 0, maxScore: 10, sortOrder: 8, autoKey: 'startDistancePenalty' },
+  { name: 'Värmning', weight: 0, minScore: 0, maxScore: 10, sortOrder: 7, autoKey: null },
 ];
 
 export const VARMNING_PARAMETER_ID = 'param-6';

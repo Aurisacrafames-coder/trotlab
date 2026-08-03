@@ -1,11 +1,23 @@
 import type Database from 'better-sqlite3';
-import { listBacktestTracks, optimizeWeights } from '../backtest.js';
-import { getParameters } from '../parameters.js';
+import { listBacktestTracks, normalizeMaxTrials, optimizeWeights } from '../backtest.js';
+import { getTrackProfileOrGlobal } from '../trackWeightProfiles.js';
+import { getTrackStats } from '../trackStats.js';
 import type { BacktestGoal, BacktestOptimizeResult } from '../../shared/types.js';
+import { DEFAULT_BACKTEST_GOAL } from '../../shared/types.js';
 
 const META_RUNNING = 'auto_opt_running';
 const META_RESULT = 'auto_opt_result';
 const META_STATUS = 'auto_opt_status';
+const AUTO_OPT_MAX_RACES = 150;
+const AUTO_OPT_BACKGROUND_TRIALS = 1500;
+
+function resultMetaKey(atgTrackId: number) {
+  return `${META_RESULT}_${atgTrackId}`;
+}
+
+function statusMetaKey(atgTrackId: number) {
+  return `${META_STATUS}_${atgTrackId}`;
+}
 
 export interface AutoOptimizerStatus {
   running: boolean;
@@ -58,7 +70,32 @@ function pickPrimaryTrack(db: Database.Database) {
   return tracks.sort((a, b) => b.racesWithResult - a.racesWithResult)[0] ?? null;
 }
 
-function loadStoredResult(db: Database.Database): BacktestOptimizeResult | null {
+function resolveTrack(db: Database.Database, atgTrackId?: number | null) {
+  const tracks = listBacktestTracks(db);
+  if (atgTrackId != null) {
+    const selected = tracks.find((t) => t.atgTrackId === atgTrackId);
+    if (!selected) {
+      return { track: null, error: 'Banan saknar importerade lopp i databasen.' };
+    }
+    if (selected.racesWithResult < 3) {
+      return {
+        track: null,
+        error: `${selected.trackName} har bara ${selected.racesWithResult} lopp med resultat — importera minst 3 för optimering.`,
+      };
+    }
+    return { track: selected, error: null };
+  }
+  const primary = pickPrimaryTrack(db);
+  if (!primary) {
+    return {
+      track: null,
+      error: 'Inga banor med tillräckligt underlag för automatisk optimering (minst 3 lopp med resultat).',
+    };
+  }
+  return { track: primary, error: null };
+}
+
+function loadLegacyResult(db: Database.Database): BacktestOptimizeResult | null {
   const raw = getMeta(db, META_RESULT);
   if (!raw) return null;
   try {
@@ -68,26 +105,114 @@ function loadStoredResult(db: Database.Database): BacktestOptimizeResult | null 
   }
 }
 
-export function getAutoOptimizerStatus(db: Database.Database): AutoOptimizerStatus {
-  if (liveStatus.running) return liveStatus;
+function loadStoredResult(db: Database.Database, atgTrackId?: number | null): BacktestOptimizeResult | null {
+  if (atgTrackId != null) {
+    const perTrack = getMeta(db, resultMetaKey(atgTrackId));
+    if (perTrack) {
+      try {
+        return JSON.parse(perTrack) as BacktestOptimizeResult;
+      } catch {
+        return null;
+      }
+    }
+    const legacy = loadLegacyResult(db);
+    if (legacy?.atgTrackId === atgTrackId) return legacy;
+    return null;
+  }
 
-  const stored = loadStoredResult(db);
-  const lastRunAt = getMeta(db, META_STATUS);
+  return loadLegacyResult(db);
+}
+
+function idleStatus(
+  db: Database.Database,
+  overrides: Partial<AutoOptimizerStatus> = {},
+): AutoOptimizerStatus {
   return {
-    ...liveStatus,
-    lastResult: stored,
-    lastRunAt,
-    phase: stored ? 'done' : 'idle',
-    message: stored?.message ?? liveStatus.message,
+    running: false,
+    atgTrackId: null,
+    trackName: null,
+    goal: null,
+    trialsRun: 0,
+    bestHits: null,
+    racesWithResult: null,
+    phase: 'idle',
+    lastResult: null,
+    lastRunAt: null,
+    message: null,
+    ...overrides,
   };
 }
 
-async function runAutoOptimize(db: Database.Database, goal: BacktestGoal = 'top3') {
-  const track = pickPrimaryTrack(db);
+export function getAutoOptimizerStatus(
+  db: Database.Database,
+  filterTrackId?: number | null,
+): AutoOptimizerStatus {
+  if (liveStatus.running) {
+    if (filterTrackId == null || liveStatus.atgTrackId === filterTrackId) {
+      return liveStatus;
+    }
+    return idleStatus(db, {
+      running: true,
+      atgTrackId: liveStatus.atgTrackId,
+      trackName: liveStatus.trackName,
+      goal: liveStatus.goal,
+      trialsRun: liveStatus.trialsRun,
+      bestHits: liveStatus.bestHits,
+      racesWithResult: liveStatus.racesWithResult,
+      phase: liveStatus.phase,
+      message: liveStatus.message ?? `Optimerar ${liveStatus.trackName ?? 'annan bana'}…`,
+    });
+  }
+
+  if (filterTrackId != null) {
+    const stored = loadStoredResult(db, filterTrackId);
+    const track = getTrackStats(db, filterTrackId);
+    if (stored) {
+      return idleStatus(db, {
+        atgTrackId: stored.atgTrackId,
+        trackName: stored.trackName,
+        goal: stored.goal,
+        bestHits: stored.optimized.hits,
+        racesWithResult: stored.racesWithResult,
+        phase: 'done',
+        lastResult: stored,
+        lastRunAt: getMeta(db, statusMetaKey(filterTrackId)) ?? getMeta(db, META_STATUS),
+        message: stored.message,
+      });
+    }
+    return idleStatus(db, {
+      atgTrackId: filterTrackId,
+      trackName: track?.trackName ?? null,
+      message: track
+        ? `Ingen optimering sparad för ${track.trackName} ännu.`
+        : 'Ingen optimering sparad för denna bana ännu.',
+    });
+  }
+
+  const stored = loadStoredResult(db);
+  const lastRunAt = getMeta(db, META_STATUS);
+  return idleStatus(db, {
+    lastResult: stored,
+    lastRunAt,
+    atgTrackId: stored?.atgTrackId ?? liveStatus.atgTrackId,
+    trackName: stored?.trackName ?? liveStatus.trackName,
+    goal: stored?.goal ?? liveStatus.goal,
+    phase: stored ? 'done' : 'idle',
+    message: stored?.message ?? liveStatus.message,
+  });
+}
+
+async function runAutoOptimize(
+  db: Database.Database,
+  goal: BacktestGoal = DEFAULT_BACKTEST_GOAL,
+  atgTrackId?: number | null,
+  maxTrials?: number,
+) {
+  const { track, error } = resolveTrack(db, atgTrackId);
   if (!track) {
     liveStatus = {
       running: false,
-      atgTrackId: null,
+      atgTrackId: atgTrackId ?? null,
       trackName: null,
       goal,
       trialsRun: 0,
@@ -96,12 +221,13 @@ async function runAutoOptimize(db: Database.Database, goal: BacktestGoal = 'top3
       phase: 'idle',
       lastResult: loadStoredResult(db),
       lastRunAt: getMeta(db, META_STATUS),
-      message: 'Inga banor med tillräckligt underlag för automatisk optimering (minst 3 lopp med resultat).',
+      message: error,
     };
     return;
   }
 
   setMeta(db, META_RUNNING, '1');
+  const trialLimit = normalizeMaxTrials(maxTrials);
   liveStatus = {
     running: true,
     atgTrackId: track.atgTrackId,
@@ -113,16 +239,17 @@ async function runAutoOptimize(db: Database.Database, goal: BacktestGoal = 'top3
     phase: 'coarse',
     lastResult: loadStoredResult(db),
     lastRunAt: getMeta(db, META_STATUS),
-    message: `Testar viktkombinationer mot ${track.trackName}…`,
+    message: `Testar viktkombinationer mot ${track.trackName} (max ${trialLimit.toLocaleString('sv-SE')} försök)…`,
   };
 
   try {
     const result = optimizeWeights(
       db,
-      getParameters(db),
+      getTrackProfileOrGlobal(db, track.atgTrackId),
       { atgTrackId: track.atgTrackId },
       goal,
       {
+        maxTrials: trialLimit,
         onProgress: (progress) => {
           liveStatus = {
             ...liveStatus,
@@ -131,12 +258,14 @@ async function runAutoOptimize(db: Database.Database, goal: BacktestGoal = 'top3
             bestHits: progress.bestHits,
             racesWithResult: progress.racesWithResult,
             phase: progress.phase,
-            message: `Testar alternativ… ${progress.trialsRun} kombinationer provade, bästa hittills ${progress.bestHits}/${progress.racesWithResult}.`,
+            message: `Testar alternativ… ${progress.trialsRun.toLocaleString('sv-SE')}/${trialLimit.toLocaleString('sv-SE')} kombinationer, bästa hittills ${progress.bestHits}/${progress.racesWithResult}.`,
           };
         },
       },
     );
 
+    setMeta(db, resultMetaKey(track.atgTrackId), JSON.stringify(result));
+    setMeta(db, statusMetaKey(track.atgTrackId), new Date().toISOString());
     setMeta(db, META_RESULT, JSON.stringify(result));
     setMeta(db, META_STATUS, new Date().toISOString());
 
@@ -145,7 +274,7 @@ async function runAutoOptimize(db: Database.Database, goal: BacktestGoal = 'top3
       atgTrackId: track.atgTrackId,
       trackName: track.trackName,
       goal,
-      trialsRun: liveStatus.trialsRun,
+      trialsRun: result.trialsRun,
       bestHits: result.optimized.hits,
       racesWithResult: result.racesWithResult,
       phase: 'done',
@@ -172,25 +301,54 @@ async function runAutoOptimize(db: Database.Database, goal: BacktestGoal = 'top3
   }
 }
 
-export function scheduleAutoOptimize(db: Database.Database, goal: BacktestGoal = 'top3') {
+export function scheduleAutoOptimize(
+  db: Database.Database,
+  goal: BacktestGoal = DEFAULT_BACKTEST_GOAL,
+  atgTrackId?: number | null,
+  maxTrials?: number,
+) {
+  const { track, error } = resolveTrack(db, atgTrackId);
+  if (!track) {
+    if (error) console.log(`Auto-optimering hoppades över: ${error}`);
+    return;
+  }
+  if (track.racesWithResult > AUTO_OPT_MAX_RACES) {
+    console.log(
+      `Auto-optimering hoppades över för ${track.trackName} (${track.racesWithResult} lopp — kör manuellt vid behov).`,
+    );
+    return;
+  }
+
+  const trialLimit = maxTrials ?? AUTO_OPT_BACKGROUND_TRIALS;
+
   if (backgroundPromise) {
     queuedRun = true;
     return;
   }
 
-  backgroundPromise = runAutoOptimize(db, goal)
+  backgroundPromise = runAutoOptimize(db, goal, atgTrackId, trialLimit)
     .catch((err) => console.error('Automatisk optimering misslyckades:', err))
     .finally(() => {
       backgroundPromise = null;
       if (queuedRun) {
         queuedRun = false;
-        scheduleAutoOptimize(db, goal);
+        scheduleAutoOptimize(db, goal, atgTrackId, maxTrials);
       }
     });
 }
 
 export function startAutoOptimizeJob(getDb: () => Database.Database) {
   setTimeout(() => {
-    scheduleAutoOptimize(getDb());
+    const db = getDb();
+    const primary = pickPrimaryTrack(db);
+    if (!primary || primary.racesWithResult > AUTO_OPT_MAX_RACES) {
+      if (primary) {
+        console.log(
+          `Auto-optimering vid start hoppades över för ${primary.trackName} (${primary.racesWithResult} lopp).`,
+        );
+      }
+      return;
+    }
+    scheduleAutoOptimize(db);
   }, 5000);
 }

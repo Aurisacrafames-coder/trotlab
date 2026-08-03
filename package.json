@@ -10,7 +10,7 @@
     "build": "tsc -b && vite build",
     "start": "tsx server/index.ts",
     "mobile": "npm run build && npm start",
-    "share": "npm run build && concurrently -k -n app,tunnel -c blue,magenta \"npm run start\" \"tsx server/scripts/tunnel.ts\"",
+    "share": "npm run build && tsx server/scripts/share.ts",
     "tunnel": "tsx server/scripts/tunnel.ts",
     "preview": "vite preview --host",
     "check:deploy": "node scripts/check-deploy-env.cjs",

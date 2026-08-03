@@ -87,10 +87,12 @@ function initSchema(database: Database.Database) {
       place TEXT,
       driver_name TEXT,
       prize_first INTEGER,
-      track_name TEXT
+      track_name TEXT,
+      is_record_time INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE INDEX IF NOT EXISTS idx_sessions_date ON race_sessions(date);
+    CREATE INDEX IF NOT EXISTS idx_sessions_track ON race_sessions(atg_track_id);
     CREATE INDEX IF NOT EXISTS idx_entries_session ON race_entries(session_id);
 
     CREATE TABLE IF NOT EXISTS session_parameters (
@@ -167,16 +169,62 @@ function initSchema(database: Database.Database) {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
-    CREATE TABLE IF NOT EXISTS track_post_win_stats (
+    CREATE TABLE IF NOT EXISTS driver_win_stats (
+      driver_id INTEGER PRIMARY KEY,
+      starts INTEGER NOT NULL,
+      wins INTEGER NOT NULL,
+      win_percent REAL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS driver_track_win_stats (
+      driver_id INTEGER NOT NULL,
       track_id INTEGER NOT NULL,
-      post_position INTEGER NOT NULL,
-      start_method TEXT NOT NULL,
       starts INTEGER NOT NULL,
       wins INTEGER NOT NULL,
       win_percent REAL,
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-      PRIMARY KEY (track_id, post_position, start_method)
+      PRIMARY KEY (driver_id, track_id)
     );
+
+    CREATE TABLE IF NOT EXISTS trainer_win_stats (
+      trainer_id INTEGER PRIMARY KEY,
+      starts INTEGER NOT NULL,
+      wins INTEGER NOT NULL,
+      win_percent REAL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS trainer_track_win_stats (
+      trainer_id INTEGER NOT NULL,
+      track_id INTEGER NOT NULL,
+      starts INTEGER NOT NULL,
+      wins INTEGER NOT NULL,
+      win_percent REAL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (trainer_id, track_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS track_post_win_stats (
+      track_id INTEGER NOT NULL,
+      post_position INTEGER NOT NULL,
+      start_method TEXT NOT NULL,
+      volte_row TEXT NOT NULL DEFAULT '',
+      starts INTEGER NOT NULL,
+      wins INTEGER NOT NULL,
+      win_percent REAL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (track_id, post_position, start_method, volte_row)
+    );
+
+    CREATE TABLE IF NOT EXISTS horse_watchlist (
+      atg_horse_id INTEGER PRIMARY KEY,
+      horse_name TEXT NOT NULL,
+      source_session_id INTEGER REFERENCES race_sessions(id) ON DELETE SET NULL,
+      marked_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_horse_watchlist_marked ON horse_watchlist(marked_at);
   `);
 
   migrateSchema(database);
@@ -230,6 +278,39 @@ function migrateSchema(database: Database.Database) {
   if (!entryColNames.has('driver_v85_win_pct')) {
     database.exec(`ALTER TABLE race_entries ADD COLUMN driver_v85_win_pct REAL`);
   }
+  if (!entryColNames.has('driver_v85_win_pct_override')) {
+    database.exec(`ALTER TABLE race_entries ADD COLUMN driver_v85_win_pct_override REAL`);
+  }
+  if (!entryColNames.has('driver_track_win_pct')) {
+    database.exec(`ALTER TABLE race_entries ADD COLUMN driver_track_win_pct REAL`);
+  }
+  if (!entryColNames.has('driver_global_win_pct')) {
+    database.exec(`ALTER TABLE race_entries ADD COLUMN driver_global_win_pct REAL`);
+    database.exec(`
+      UPDATE race_entries
+      SET driver_global_win_pct = driver_v85_win_pct
+      WHERE driver_global_win_pct IS NULL AND driver_v85_win_pct IS NOT NULL
+    `);
+    database.exec(`
+      UPDATE race_entries
+      SET driver_track_win_pct = (
+        SELECT d.win_percent
+        FROM driver_track_win_stats d
+        JOIN race_sessions rs ON rs.id = race_entries.session_id
+        WHERE d.driver_id = race_entries.atg_driver_id
+          AND d.track_id = rs.atg_track_id
+          AND d.starts > 0
+      )
+      WHERE atg_driver_id IS NOT NULL AND driver_track_win_pct IS NULL
+    `);
+    database.exec(`
+      UPDATE race_entries
+      SET driver_global_win_pct = (
+        SELECT win_percent FROM driver_win_stats WHERE driver_id = race_entries.atg_driver_id
+      )
+      WHERE atg_driver_id IS NOT NULL AND driver_global_win_pct IS NULL
+    `);
+  }
   if (!entryColNames.has('track_post_win_pct')) {
     database.exec(`ALTER TABLE race_entries ADD COLUMN track_post_win_pct REAL`);
   }
@@ -242,6 +323,37 @@ function migrateSchema(database: Database.Database) {
   if (!entryColNames.has('bet_distribution_pct')) {
     database.exec(`ALTER TABLE race_entries ADD COLUMN bet_distribution_pct REAL`);
   }
+  if (!entryColNames.has('atg_trainer_id')) {
+    database.exec(`ALTER TABLE race_entries ADD COLUMN atg_trainer_id INTEGER`);
+  }
+  if (!entryColNames.has('trainer_name')) {
+    database.exec(`ALTER TABLE race_entries ADD COLUMN trainer_name TEXT`);
+  }
+  if (!entryColNames.has('trainer_win_pct')) {
+    database.exec(`ALTER TABLE race_entries ADD COLUMN trainer_win_pct REAL`);
+  }
+  if (!entryColNames.has('trainer_win_pct_override')) {
+    database.exec(`ALTER TABLE race_entries ADD COLUMN trainer_win_pct_override REAL`);
+  }
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS trainer_win_stats (
+      trainer_id INTEGER PRIMARY KEY,
+      starts INTEGER NOT NULL,
+      wins INTEGER NOT NULL,
+      win_percent REAL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS trainer_track_win_stats (
+      trainer_id INTEGER NOT NULL,
+      track_id INTEGER NOT NULL,
+      starts INTEGER NOT NULL,
+      wins INTEGER NOT NULL,
+      win_percent REAL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (trainer_id, track_id)
+    );
+  `);
 
   const raceCols = database
     .prepare('PRAGMA table_info(race_sessions)')
@@ -277,15 +389,77 @@ function migrateSchema(database: Database.Database) {
       `ALTER TABLE race_entries ADD COLUMN driver_apprentice INTEGER NOT NULL DEFAULT 0`,
     );
   }
+  if (!entryColNames.has('scratched')) {
+    database.exec(
+      `ALTER TABLE race_entries ADD COLUMN scratched INTEGER NOT NULL DEFAULT 0`,
+    );
+  }
+
+  database.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_track ON race_sessions(atg_track_id)`);
+  database.exec(
+    `CREATE INDEX IF NOT EXISTS idx_entries_session_position ON race_entries(session_id, actual_position)`,
+  );
+
+  const formCols = database
+    .prepare('PRAGMA table_info(form_starts)')
+    .all() as Array<{ name: string }>;
+  const formColNames = new Set(formCols.map((c) => c.name));
+  if (!formColNames.has('is_record_time')) {
+    database.exec(
+      `ALTER TABLE form_starts ADD COLUMN is_record_time INTEGER NOT NULL DEFAULT 0`,
+    );
+    database.exec(
+      `UPDATE form_starts SET is_record_time = 1 WHERE km_time GLOB '[0-9].[0-9][0-9],[0-9]r'`,
+    );
+  }
 
   seedNewParameters(database);
   backfillGameSessions(database);
   migrateTrackPostStats(database);
+  migrateTrackPostVolteRow(database);
   backfillTrackRaceNumbers(database);
   renameDriverGamePercentParameter(database);
   fixParameterNameEncoding(database);
   mergePostParameters(database);
   fixInvalidActualPositions(database);
+  reconcileDriverWinPctFromCache(database);
+}
+
+/** Fix global kusk % that was wrongly copied from track-only legacy column. */
+function reconcileDriverWinPctFromCache(database: Database.Database) {
+  const done = database
+    .prepare(`SELECT value FROM stats_sync_meta WHERE key = 'driver_pct_reconciled_v1'`)
+    .get() as { value: string } | undefined;
+  if (done?.value === '1') return;
+
+  database.exec(`
+    UPDATE race_entries
+    SET driver_global_win_pct = (
+      SELECT win_percent FROM driver_win_stats
+      WHERE driver_id = race_entries.atg_driver_id
+    )
+    WHERE atg_driver_id IS NOT NULL
+      AND driver_v85_win_pct_override IS NULL
+  `);
+
+  database.exec(`
+    UPDATE race_entries
+    SET driver_track_win_pct = (
+      SELECT d.win_percent
+      FROM driver_track_win_stats d
+      JOIN race_sessions rs ON rs.id = race_entries.session_id
+      WHERE d.driver_id = race_entries.atg_driver_id
+        AND d.track_id = rs.atg_track_id
+        AND d.starts > 0
+    )
+    WHERE atg_driver_id IS NOT NULL
+      AND driver_v85_win_pct_override IS NULL
+  `);
+
+  database.prepare(
+    `INSERT INTO stats_sync_meta (key, value, updated_at) VALUES ('driver_pct_reconciled_v1', '1', datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+  ).run();
 }
 
 /** One Spår parameter: track lane win % only. Removes theoretical "Spår idag". */
@@ -430,6 +604,29 @@ function migrateTrackPostStats(database: Database.Database) {
   `);
 }
 
+function migrateTrackPostVolteRow(database: Database.Database) {
+  const cols = database
+    .prepare('PRAGMA table_info(track_post_win_stats)')
+    .all() as Array<{ name: string }>;
+  if (cols.some((c) => c.name === 'volte_row')) return;
+
+  database.exec(`
+    CREATE TABLE track_post_win_stats_new (
+      track_id INTEGER NOT NULL,
+      post_position INTEGER NOT NULL,
+      start_method TEXT NOT NULL,
+      volte_row TEXT NOT NULL DEFAULT '',
+      starts INTEGER NOT NULL,
+      wins INTEGER NOT NULL,
+      win_percent REAL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (track_id, post_position, start_method, volte_row)
+    );
+    DROP TABLE track_post_win_stats;
+    ALTER TABLE track_post_win_stats_new RENAME TO track_post_win_stats;
+  `);
+}
+
 function backfillGameSessions(database: Database.Database) {
   const unlinked = database
     .prepare('SELECT COUNT(*) as c FROM race_sessions WHERE game_session_id IS NULL')
@@ -512,6 +709,24 @@ function seedNewParameters(database: Database.Database) {
       sortOrder: 6,
       autoKey: 'recentWin',
     },
+    {
+      id: 'param-8',
+      name: 'Tränare vinst%',
+      weight: 0,
+      minScore: 0,
+      maxScore: 10,
+      sortOrder: 5,
+      autoKey: 'trainerWin',
+    },
+    {
+      id: 'param-9',
+      name: 'Startstraff',
+      weight: 0,
+      minScore: 0,
+      maxScore: 10,
+      sortOrder: 8,
+      autoKey: 'startDistancePenalty',
+    },
   ];
 
   const insert = database.prepare(`
@@ -522,6 +737,55 @@ function seedNewParameters(database: Database.Database) {
   for (const p of extra) {
     const exists = database.prepare('SELECT 1 FROM parameters WHERE id = ?').get(p.id);
     if (!exists) insert.run(p);
+  }
+
+  backfillTrackProfileParameters(database);
+}
+
+function backfillTrackProfileParameters(database: Database.Database) {
+  const globalParams = database
+    .prepare(
+      `SELECT id, name, weight, min_score as minScore, max_score as maxScore,
+              sort_order as sortOrder, auto_key as autoKey
+       FROM parameters ORDER BY sort_order`,
+    )
+    .all() as Array<{
+    id: string;
+    name: string;
+    weight: number;
+    minScore: number;
+    maxScore: number;
+    sortOrder: number;
+    autoKey: string | null;
+  }>;
+
+  const tracks = database
+    .prepare(`SELECT atg_track_id as atgTrackId FROM track_profile_meta`)
+    .all() as Array<{ atgTrackId: number }>;
+
+  const existing = database.prepare(
+    `SELECT 1 FROM track_weight_profiles WHERE atg_track_id = ? AND parameter_id = ?`,
+  );
+  const insert = database.prepare(`
+    INSERT INTO track_weight_profiles
+      (atg_track_id, parameter_id, name, weight, min_score, max_score, sort_order, auto_key)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  for (const track of tracks) {
+    for (const param of globalParams) {
+      if (existing.get(track.atgTrackId, param.id)) continue;
+      insert.run(
+        track.atgTrackId,
+        param.id,
+        param.name,
+        param.weight,
+        param.minScore,
+        param.maxScore,
+        param.sortOrder,
+        param.autoKey,
+      );
+    }
   }
 }
 

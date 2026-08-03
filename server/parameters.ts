@@ -12,6 +12,43 @@ export function getParameters(db: Database.Database): Parameter[] {
     .all() as Parameter[];
 }
 
+/** Fill in any parameters added after a track profile was saved. */
+export function mergeParametersWithGlobal(
+  trackParams: Parameter[],
+  globalParams: Parameter[],
+): Parameter[] {
+  const trackById = new Map(trackParams.map((p) => [p.id, p]));
+  return globalParams.map((global) => trackById.get(global.id) ?? global);
+}
+
+export type ScoringProfileSource = 'tip' | 'track' | 'global';
+
+export function getScoringProfileSource(
+  db: Database.Database,
+  sessionId: number,
+): ScoringProfileSource {
+  const session = db
+    .prepare(
+      `SELECT uses_tip_parameters as usesTip, atg_track_id as atgTrackId
+       FROM race_sessions WHERE id = ?`,
+    )
+    .get(sessionId) as { usesTip: number; atgTrackId: number | null } | undefined;
+
+  if (session?.usesTip) {
+    const tipParams = getSessionTipParameters(db, sessionId);
+    if (tipParams.length > 0) return 'tip';
+  }
+
+  if (session?.atgTrackId != null) {
+    const trackProfile = db
+      .prepare(`SELECT 1 FROM track_profile_meta WHERE atg_track_id = ?`)
+      .get(session.atgTrackId);
+    if (trackProfile) return 'track';
+  }
+
+  return 'global';
+}
+
 export function getSessionTipParameters(db: Database.Database, sessionId: number): Parameter[] {
   return db
     .prepare(
@@ -37,7 +74,9 @@ export function getScoringParameters(db: Database.Database, sessionId: number): 
 
   if (session?.atgTrackId != null) {
     const trackProfile = getTrackProfileParameters(db, session.atgTrackId);
-    if (trackProfile) return trackProfile;
+    if (trackProfile) {
+      return mergeParametersWithGlobal(trackProfile, getParameters(db));
+    }
   }
 
   return getParameters(db);

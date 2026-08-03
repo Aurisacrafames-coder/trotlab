@@ -7,6 +7,7 @@ import {
   startBulkImport,
 } from '../api';
 import type { BulkImportStatus, KnownTrack } from '../../shared/types';
+import { BULK_IMPORT_LOOKBACK_MONTHS } from '../../shared/types';
 
 export default function ImportPage() {
   const [url, setUrl] = useState('');
@@ -73,7 +74,7 @@ export default function ImportPage() {
         atgTrackId: selectedBulkTrack.atgTrackId,
         trackSlug: selectedBulkTrack.slug,
         trackName: selectedBulkTrack.name,
-        months: 6,
+        months: BULK_IMPORT_LOOKBACK_MONTHS,
       });
       setBulkStatus(status);
     } catch (e) {
@@ -88,7 +89,7 @@ export default function ImportPage() {
       <div className="card">
         <h2>Importera historik för optimering</h2>
         <p className="muted" style={{ marginTop: 0 }}>
-          Hämta avslutade lopp från en bana (senaste 6 månaderna) för att kunna optimera
+          Hämta avslutade lopp från en bana (senaste {BULK_IMPORT_LOOKBACK_MONTHS} månaderna) för att kunna optimera
           viktprofilen under Inställningar. Importen körs i bakgrunden och kan ta flera minuter.
         </p>
 
@@ -118,7 +119,7 @@ export default function ImportPage() {
               ? 'Importerar…'
               : bulkStarting
                 ? 'Startar…'
-                : 'Importera senaste 6 månaderna'}
+                : `Importera senaste ${BULK_IMPORT_LOOKBACK_MONTHS} månaderna`}
           </button>
         </div>
 
@@ -160,7 +161,9 @@ export default function ImportPage() {
       <div className="card">
         <h2>Importera lopp från ATG</h2>
         <p className="muted" style={{ marginTop: 0 }}>
-          Klistra in en länk till en avdelning (V86, V85, GS75, V64 …) — t.ex. tisdagens V86 på Jägersro.
+          Klistra in en länk till en avdelning (V86, V85, GS75, V64 …) eller ett enstaka lopp
+          (vinnarspelet), t.ex.{' '}
+          <code>/spel/2026-07-27/vinnare/ostersund/lopp/2</code>.
           Första importen kan ta några sekunder.
         </p>
         <div className="import-row">

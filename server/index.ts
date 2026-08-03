@@ -5,8 +5,9 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { getDb } from './db.js';
-import { fetchRaceResults, fetchRaceResultsFromUrl } from './atg.js';
-import { getStatsSyncStatus, runTrackPostStatsSync, backfillTrackPostWinPct } from './atgStats.js';
+import { fetchRaceResults, fetchRaceResultsFromUrl, refreshSessionScratchStatus } from './atg.js';
+import { getStatsSyncStatus, runFullStatsSync, refreshSessionDriverV85WinPct, refreshSessionTrainerWinPct, backfillDriverV85WinPct } from './atgStats.js';
+import { refreshSessionTrainerData, sessionNeedsTrainerBackfill } from './trainerRefresh.js';
 import {
   getRaceIdsForGame,
   listGameSessions,
@@ -18,14 +19,22 @@ import {
 import { startStatsSyncJob } from './jobs/syncStats.js';
 import { getAutoOptimizerStatus, scheduleAutoOptimize, startAutoOptimizeJob } from './jobs/autoOptimize.js';
 import { startEarningsRefreshJob } from './jobs/refreshEarnings.js';
-import { listBacktestTracks, optimizeWeights, runBacktest } from './backtest.js';
+import { listBacktestTracks, normalizeMaxTrials, optimizeWeights, runBacktest } from './backtest.js';
 import { refreshAllGameSessionRaceInfo } from './raceInfoRefresh.js';
 import { saveUserSystem, validateUserSystemLegs } from './userSystem.js';
+import {
+  addHorseToWatchlist,
+  listWatchlist,
+  removeHorseFromWatchlist,
+  getActiveWatchlistIdSet,
+  WATCHLIST_DAYS,
+} from './watchlist.js';
 import { getBulkImportStatus, scheduleBulkImport } from './jobs/bulkImport.js';
 import { listKnownTracks } from './atg.js';
 import {
   getParameters as loadParameters,
   getScoringParameters,
+  getScoringProfileSource,
   getSessionTipParameters,
   saveTipParameterSnapshot,
 } from './parameters.js';
@@ -36,8 +45,19 @@ import {
   saveTrackProfile,
 } from './trackWeightProfiles.js';
 import { computeStatsSummary, type StatsFilters } from './stats.js';
+import {
+  fetchDriverContributingStarts,
+  fetchTrainerContributingStarts,
+  getDriverStatSummary,
+  getTrainerStatSummary,
+  searchStatEntities,
+} from './statsVerification.js';
 import { accessGate } from './auth.js';
+import { persistImportedRace } from './importService.js';
+import { startTrainerBackfillJob } from './trainerRefresh.js';
 import type { BacktestGoal, Parameter, RaceEntry, RaceSession } from '../shared/types.js';
+import { DEFAULT_BACKTEST_GOAL } from '../shared/types.js';
+import { BULK_IMPORT_LOOKBACK_MONTHS } from '../shared/types.js';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3847;
@@ -57,7 +77,7 @@ function recalculateSessionScores(sessionId: number, options?: { useGlobal?: boo
   recalcSessionScores(getDb(), sessionId, options);
 }
 
-function loadSession(id: number): RaceSession | null {
+async function loadSession(id: number): Promise<RaceSession | null> {
   const db = getDb();
   const session = db
     .prepare(
@@ -78,9 +98,33 @@ function loadSession(id: number): RaceSession | null {
 
   if (!session) return null;
 
+  if (sessionNeedsTrainerBackfill(db, id)) {
+    try {
+      await refreshSessionTrainerData(db, id);
+    } catch (err) {
+      console.error(`Kunde inte hämta tränare för lopp ${id}:`, err);
+    }
+  } else if (refreshSessionTrainerWinPct(db, id)) {
+    recalculateSessionScores(id);
+  }
+
+  if (refreshSessionDriverV85WinPct(db, id)) {
+    recalculateSessionScores(id);
+  }
+
+  try {
+    if (await refreshSessionScratchStatus(db, id)) {
+      recalculateSessionScores(id);
+    }
+  } catch (err) {
+    console.error(`Kunde inte synka strykningar för lopp ${id}:`, err);
+  }
+
   const tipParameters = getSessionTipParameters(db, id);
   const scoringParameters = getScoringParameters(db, id);
+  const scoringProfileSource = getScoringProfileSource(db, id);
   const usesTipParameters = session.usesTipParameters === 1;
+  const watchedHorseIds = getActiveWatchlistIdSet(db);
 
   const entries = db
     .prepare(
@@ -88,13 +132,19 @@ function loadSession(id: number): RaceSession | null {
               start_distance as startDistance, volte_row as volteRow,
               horse_name as horseName, atg_horse_id as atgHorseId,
               atg_driver_id as atgDriverId, driver_name as driverName,
+              atg_trainer_id as atgTrainerId, trainer_name as trainerName,
               start_points as startPoints, earnings_per_start as earningsPerStart,
               horse_sex as horseSex, career_starts as careerStarts,
               driver_apprentice as driverApprentice,
-              driver_v85_win_pct as driverV85WinPct,
+              driver_track_win_pct as driverTrackWinPct,
+              driver_global_win_pct as driverGlobalWinPct,
+              driver_v85_win_pct_override as driverV85WinPctOverride,
+              trainer_win_pct as trainerWinPct,
+              trainer_win_pct_override as trainerWinPctOverride,
               bet_distribution_pct as betDistributionPct,
               track_post_win_pct as trackPostWinPct,
-              trot_score as trotScore, actual_position as actualPosition
+              trot_score as trotScore, actual_position as actualPosition,
+              scratched
        FROM race_entries WHERE session_id = ? ORDER BY start_number`,
     )
     .all(id) as RaceEntry[];
@@ -104,10 +154,16 @@ function loadSession(id: number): RaceSession | null {
       .prepare(
         `SELECT form_order as formOrder, date, distance, post_position as postPosition,
                 km_time as kmTime, place, driver_name as driverName,
-                prize_first as prizeFirst, track_name as trackName
+                prize_first as prizeFirst, track_name as trackName,
+                is_record_time as isRecordTime
          FROM form_starts WHERE entry_id = ? ORDER BY form_order`,
       )
       .all(entry.id) as RaceEntry['formStarts'];
+
+    entry.formStarts = entry.formStarts.map((f) => ({
+      ...f,
+      isRecordTime: Boolean((f as { isRecordTime?: number | boolean }).isRecordTime),
+    }));
 
     const scoresRows = db
       .prepare('SELECT parameter_id, score FROM entry_scores WHERE entry_id = ?')
@@ -116,6 +172,10 @@ function loadSession(id: number): RaceSession | null {
     entry.scores = Object.fromEntries(scoresRows.map((r) => [r.parameter_id, r.score]));
     entry.driverApprentice = Boolean(
       (entry as RaceEntry & { driverApprentice?: number | boolean }).driverApprentice,
+    );
+    entry.isWatched = watchedHorseIds.has(entry.atgHorseId);
+    entry.scratched = Boolean(
+      (entry as RaceEntry & { scratched?: number | boolean }).scratched,
     );
   }
 
@@ -133,6 +193,7 @@ function loadSession(id: number): RaceSession | null {
     ...session,
     raceTerms,
     usesTipParameters,
+    scoringProfileSource,
     tipParameters: tipParameters.length > 0 ? tipParameters : null,
     scoringParameters,
     entries,
@@ -174,7 +235,7 @@ app.post('/api/import', async (req, res) => {
 
     const sessionId = await persistImportedRace(getDb(), url.trim());
     scheduleAutoOptimize(getDb());
-    res.json(loadSession(sessionId));
+    res.json(await loadSession(sessionId));
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Import misslyckades';
     res.status(500).json({ error: message });
@@ -205,7 +266,7 @@ app.post('/api/import/bulk', (req, res) => {
     atgTrackId,
     trackSlug: trackSlug.trim(),
     trackName: trackName.trim(),
-    months: months ?? 6,
+    months: months ?? BULK_IMPORT_LOOKBACK_MONTHS,
   });
   res.json(getBulkImportStatus(getDb()));
 });
@@ -258,13 +319,13 @@ app.get('/api/sessions', (_req, res) => {
   res.json(rows);
 });
 
-app.get('/api/sessions/:id', (req, res) => {
-  const session = loadSession(parseInt(req.params.id, 10));
+app.get('/api/sessions/:id', async (req, res) => {
+  const session = await loadSession(parseInt(req.params.id, 10));
   if (!session) return res.status(404).json({ error: 'Lopp hittades inte' });
   res.json(session);
 });
 
-app.patch('/api/sessions/:sessionId/entries/:entryId/scores', (req, res) => {
+app.patch('/api/sessions/:sessionId/entries/:entryId/scores', async (req, res) => {
   const sessionId = parseInt(req.params.sessionId, 10);
   const entryId = parseInt(req.params.entryId, 10);
   const { parameterId, score } = req.body as { parameterId: string; score: number };
@@ -305,25 +366,66 @@ app.patch('/api/sessions/:sessionId/entries/:entryId/scores', (req, res) => {
   }
 
   recalculateSessionScores(sessionId);
-  res.json(loadSession(sessionId));
+  res.json(await loadSession(sessionId));
 });
 
-app.post('/api/sessions/:id/submit-tip', (req, res) => {
-  const sessionId = parseInt(req.params.id, 10);
+app.patch('/api/sessions/:sessionId/entries/:entryId/driver-win-pct', async (req, res) => {
+  const sessionId = parseInt(req.params.sessionId, 10);
+  const entryId = parseInt(req.params.entryId, 10);
+  const { winPct } = req.body as { winPct: number | null };
+
+  if (!('winPct' in (req.body as object))) {
+    return res.status(400).json({ error: 'winPct krävs (tal eller null)' });
+  }
+  if (winPct != null && (Number.isNaN(Number(winPct)) || winPct < 0 || winPct > 100)) {
+    return res.status(400).json({ error: 'Kusk % måste vara 0–100' });
+  }
+
   const db = getDb();
-  const exists = db
-    .prepare('SELECT id FROM race_sessions WHERE id = ?')
-    .get(sessionId) as { id: number } | undefined;
+  const entry = db
+    .prepare('SELECT id FROM race_entries WHERE id = ? AND session_id = ?')
+    .get(entryId, sessionId) as { id: number } | undefined;
 
-  if (!exists) return res.status(404).json({ error: 'Lopp hittades inte' });
+  if (!entry) return res.status(404).json({ error: 'Häst hittades inte i loppet' });
 
-  const params = getParameters();
-  saveTipParameterSnapshot(getDb(), sessionId, params);
+  db.prepare('UPDATE race_entries SET driver_v85_win_pct_override = ? WHERE id = ?').run(
+    winPct,
+    entryId,
+  );
+
   recalculateSessionScores(sessionId);
-  res.json(loadSession(sessionId));
+  res.json(await loadSession(sessionId));
 });
 
-app.post('/api/sessions/:id/recalculate', (req, res) => {
+app.patch('/api/sessions/:sessionId/entries/:entryId/trainer-win-pct', async (req, res) => {
+  const sessionId = parseInt(req.params.sessionId, 10);
+  const entryId = parseInt(req.params.entryId, 10);
+  const { winPct } = req.body as { winPct: number | null };
+
+  if (!('winPct' in (req.body as object))) {
+    return res.status(400).json({ error: 'winPct krävs (tal eller null)' });
+  }
+  if (winPct != null && (Number.isNaN(Number(winPct)) || winPct < 0 || winPct > 100)) {
+    return res.status(400).json({ error: 'Tränare % måste vara 0–100' });
+  }
+
+  const db = getDb();
+  const entry = db
+    .prepare('SELECT id FROM race_entries WHERE id = ? AND session_id = ?')
+    .get(entryId, sessionId) as { id: number } | undefined;
+
+  if (!entry) return res.status(404).json({ error: 'Häst hittades inte i loppet' });
+
+  db.prepare('UPDATE race_entries SET trainer_win_pct_override = ? WHERE id = ?').run(
+    winPct,
+    entryId,
+  );
+
+  recalculateSessionScores(sessionId);
+  res.json(await loadSession(sessionId));
+});
+
+app.post('/api/sessions/:id/submit-tip', async (req, res) => {
   const sessionId = parseInt(req.params.id, 10);
   const db = getDb();
   const exists = db
@@ -331,13 +433,30 @@ app.post('/api/sessions/:id/recalculate', (req, res) => {
     .get(sessionId) as { id: number } | undefined;
 
   if (!exists) return res.status(404).json({ error: 'Lopp hittades inte' });
+
+  const params = getScoringParameters(db, sessionId);
+  saveTipParameterSnapshot(db, sessionId, params);
+  recalculateSessionScores(sessionId);
+  res.json(await loadSession(sessionId));
+});
+
+app.post('/api/sessions/:id/recalculate', async (req, res) => {
+  const sessionId = parseInt(req.params.id, 10);
+  const db = getDb();
+  const exists = db
+    .prepare('SELECT id FROM race_sessions WHERE id = ?')
+    .get(sessionId) as { id: number } | undefined;
+
+  if (!exists) return res.status(404).json({ error: 'Lopp hittades inte' });
+
+  const useGlobal = (req.body as { useGlobal?: boolean })?.useGlobal === true;
 
   db.prepare('UPDATE race_sessions SET uses_tip_parameters = 0 WHERE id = ?').run(sessionId);
-  recalculateSessionScores(sessionId, { useGlobal: true });
-  res.json(loadSession(sessionId));
+  recalculateSessionScores(sessionId, useGlobal ? { useGlobal: true } : undefined);
+  res.json(await loadSession(sessionId));
 });
 
-app.post('/api/sessions/:id/restore-tip', (req, res) => {
+app.post('/api/sessions/:id/restore-tip', async (req, res) => {
   const sessionId = parseInt(req.params.id, 10);
   const db = getDb();
   const session = db
@@ -351,7 +470,7 @@ app.post('/api/sessions/:id/restore-tip', (req, res) => {
 
   db.prepare('UPDATE race_sessions SET uses_tip_parameters = 1 WHERE id = ?').run(sessionId);
   recalculateSessionScores(sessionId);
-  res.json(loadSession(sessionId));
+  res.json(await loadSession(sessionId));
 });
 
 function applyRaceResults(
@@ -390,7 +509,7 @@ app.post('/api/sessions/:id/fetch-results', async (req, res) => {
 
     applyRaceResults(sessionId, resultUpdate.results, resultUpdate.status);
     scheduleAutoOptimize(getDb());
-    res.json(loadSession(sessionId));
+    res.json(await loadSession(sessionId));
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Kunde inte hämta resultat';
     res.status(500).json({ error: message });
@@ -409,9 +528,8 @@ app.post('/api/stats/sync', async (_req, res) => {
   }
 
   try {
-    await runTrackPostStatsSync(db);
-    const entriesUpdated = backfillTrackPostWinPct(db);
-    res.json({ ...getStatsSyncStatus(db), entriesUpdated });
+    await runFullStatsSync(db);
+    res.json(getStatsSyncStatus(db));
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Synk misslyckades';
     res.status(500).json({ error: message });
@@ -476,10 +594,13 @@ app.post('/api/game-sessions/:id/submit-tip', (req, res) => {
   const game = loadGameSession(db, gameSessionId);
   if (!game) return res.status(404).json({ error: 'Omgång hittades inte' });
 
-  const params = getParameters();
-  saveGameTipSnapshot(db, gameSessionId, params);
+  const raceIds = getRaceIdsForGame(db, gameSessionId);
+  const gameParams =
+    raceIds.length > 0 ? getScoringParameters(db, raceIds[0]) : getParameters(db);
+  saveGameTipSnapshot(db, gameSessionId, gameParams);
 
-  for (const raceId of getRaceIdsForGame(db, gameSessionId)) {
+  for (const raceId of raceIds) {
+    const params = getScoringParameters(db, raceId);
     saveRaceTipSnapshot(db, raceId, params);
     recalculateSessionScores(raceId);
   }
@@ -494,10 +615,12 @@ app.post('/api/game-sessions/:id/recalculate', (req, res) => {
     return res.status(404).json({ error: 'Omgång hittades inte' });
   }
 
+  const useGlobal = (req.body as { useGlobal?: boolean })?.useGlobal === true;
+
   db.prepare('UPDATE game_sessions SET uses_tip_parameters = 0 WHERE id = ?').run(gameSessionId);
   for (const raceId of getRaceIdsForGame(db, gameSessionId)) {
     db.prepare('UPDATE race_sessions SET uses_tip_parameters = 0 WHERE id = ?').run(raceId);
-    recalculateSessionScores(raceId, { useGlobal: true });
+    recalculateSessionScores(raceId, useGlobal ? { useGlobal: true } : undefined);
   }
 
   res.json(loadGameSession(db, gameSessionId));
@@ -584,8 +707,135 @@ function parseStatsFilters(query: express.Request['query']): StatsFilters {
   };
 }
 
+app.get('/api/stats/entities', (req, res) => {
+  const q = typeof req.query.q === 'string' ? req.query.q : undefined;
+  res.json(searchStatEntities(getDb(), q));
+});
+
+app.get('/api/stats/drivers/:id', (req, res) => {
+  const driverId = parseInt(req.params.id, 10);
+  if (Number.isNaN(driverId)) return res.status(400).json({ error: 'Ogiltigt kusk-id' });
+
+  const trackIdRaw = req.query.trackId;
+  const sessionIdRaw = req.query.sessionId;
+  const entryIdRaw = req.query.entryId;
+  const trackId =
+    typeof trackIdRaw === 'string' && trackIdRaw.trim() !== ''
+      ? parseInt(trackIdRaw, 10)
+      : null;
+  const sessionId =
+    typeof sessionIdRaw === 'string' && sessionIdRaw.trim() !== ''
+      ? parseInt(sessionIdRaw, 10)
+      : null;
+  const entryId =
+    typeof entryIdRaw === 'string' && entryIdRaw.trim() !== ''
+      ? parseInt(entryIdRaw, 10)
+      : null;
+
+  res.json(
+    getDriverStatSummary(getDb(), driverId, {
+      trackId: Number.isNaN(trackId ?? NaN) ? null : trackId,
+      sessionId: Number.isNaN(sessionId ?? NaN) ? null : sessionId,
+      entryId: Number.isNaN(entryId ?? NaN) ? null : entryId,
+    }),
+  );
+});
+
+app.get('/api/stats/drivers/:id/races', async (req, res) => {
+  const driverId = parseInt(req.params.id, 10);
+  if (Number.isNaN(driverId)) return res.status(400).json({ error: 'Ogiltigt kusk-id' });
+
+  const trackIdRaw = req.query.trackId;
+  const scopeRaw = req.query.scope;
+  const trackId =
+    typeof trackIdRaw === 'string' && trackIdRaw.trim() !== ''
+      ? parseInt(trackIdRaw, 10)
+      : null;
+  const scope =
+    scopeRaw === 'track' || scopeRaw === 'global' || scopeRaw === 'auto' ? scopeRaw : 'auto';
+
+  try {
+    const result = await fetchDriverContributingStarts(
+      driverId,
+      scope,
+      Number.isNaN(trackId ?? NaN) ? null : trackId,
+    );
+    res.json(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Kunde inte hämta lopp';
+    res.status(500).json({ error: message });
+  }
+});
+
+app.get('/api/stats/trainers/:id', (req, res) => {
+  const trainerId = parseInt(req.params.id, 10);
+  if (Number.isNaN(trainerId)) return res.status(400).json({ error: 'Ogiltigt tränar-id' });
+
+  const sessionIdRaw = req.query.sessionId;
+  const entryIdRaw = req.query.entryId;
+  const sessionId =
+    typeof sessionIdRaw === 'string' && sessionIdRaw.trim() !== ''
+      ? parseInt(sessionIdRaw, 10)
+      : null;
+  const entryId =
+    typeof entryIdRaw === 'string' && entryIdRaw.trim() !== ''
+      ? parseInt(entryIdRaw, 10)
+      : null;
+
+  res.json(
+    getTrainerStatSummary(getDb(), trainerId, {
+      sessionId: Number.isNaN(sessionId ?? NaN) ? null : sessionId,
+      entryId: Number.isNaN(entryId ?? NaN) ? null : entryId,
+    }),
+  );
+});
+
+app.get('/api/stats/trainers/:id/races', async (req, res) => {
+  const trainerId = parseInt(req.params.id, 10);
+  if (Number.isNaN(trainerId)) return res.status(400).json({ error: 'Ogiltigt tränar-id' });
+
+  try {
+    const result = await fetchTrainerContributingStarts(trainerId);
+    res.json(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Kunde inte hämta lopp';
+    res.status(500).json({ error: message });
+  }
+});
+
 app.get('/api/stats', (req, res) => {
   res.json(computeStatsSummary(getDb(), parseStatsFilters(req.query)));
+});
+
+app.get('/api/watchlist', (_req, res) => {
+  res.json({ entries: listWatchlist(getDb()), days: WATCHLIST_DAYS });
+});
+
+app.post('/api/watchlist', (req, res) => {
+  const { atgHorseId, horseName, sourceSessionId } = req.body as {
+    atgHorseId?: number;
+    horseName?: string;
+    sourceSessionId?: number | null;
+  };
+  if (atgHorseId == null || !Number.isFinite(atgHorseId)) {
+    return res.status(400).json({ error: 'atgHorseId krävs' });
+  }
+  if (!horseName?.trim()) {
+    return res.status(400).json({ error: 'horseName krävs' });
+  }
+
+  const db = getDb();
+  addHorseToWatchlist(db, atgHorseId, horseName.trim(), sourceSessionId ?? null);
+  res.json({ ok: true, days: WATCHLIST_DAYS });
+});
+
+app.delete('/api/watchlist/:atgHorseId', (req, res) => {
+  const atgHorseId = parseInt(req.params.atgHorseId, 10);
+  if (Number.isNaN(atgHorseId)) {
+    return res.status(400).json({ error: 'Ogiltigt häst-id' });
+  }
+  removeHorseFromWatchlist(getDb(), atgHorseId);
+  res.json({ ok: true });
 });
 
 app.get('/api/backtest/tracks', (_req, res) => {
@@ -619,11 +869,12 @@ app.post('/api/backtest/run', (req, res) => {
 });
 
 app.post('/api/backtest/optimize', (req, res) => {
-  const { atgTrackId, startMethod, gameType, goal } = req.body as {
+  const { atgTrackId, startMethod, gameType, goal, maxTrials } = req.body as {
     atgTrackId?: number;
     startMethod?: 'auto' | 'volte' | null;
     gameType?: string | null;
     goal?: BacktestGoal;
+    maxTrials?: number;
   };
 
   if (atgTrackId == null) {
@@ -638,19 +889,28 @@ app.post('/api/backtest/optimize', (req, res) => {
     getTrackProfileOrGlobal(getDb(), atgTrackId),
     { atgTrackId, startMethod: startMethod ?? undefined, gameType: gameType ?? undefined },
     goal,
+    { maxTrials: normalizeMaxTrials(maxTrials) },
   );
   res.json(result);
 });
 
-app.get('/api/backtest/auto', (_req, res) => {
-  res.json(getAutoOptimizerStatus(getDb()));
+app.get('/api/backtest/auto', (req, res) => {
+  const atgTrackId = req.query.atgTrackId ? Number(req.query.atgTrackId) : undefined;
+  const filterTrackId = Number.isFinite(atgTrackId) ? atgTrackId : undefined;
+  res.json(getAutoOptimizerStatus(getDb(), filterTrackId));
 });
 
 app.post('/api/backtest/auto/run', (req, res) => {
-  const { goal } = (req.body ?? {}) as { goal?: BacktestGoal };
-  const selectedGoal = goal === 'win' ? 'win' : 'top3';
-  scheduleAutoOptimize(getDb(), selectedGoal);
-  res.json(getAutoOptimizerStatus(getDb()));
+  const { goal, atgTrackId, maxTrials } = (req.body ?? {}) as {
+    goal?: BacktestGoal;
+    atgTrackId?: number;
+    maxTrials?: number;
+  };
+  const selectedGoal = goal === 'top3' ? 'top3' : DEFAULT_BACKTEST_GOAL;
+  const trackId =
+    typeof atgTrackId === 'number' && Number.isFinite(atgTrackId) ? atgTrackId : undefined;
+  scheduleAutoOptimize(getDb(), selectedGoal, trackId, normalizeMaxTrials(maxTrials));
+  res.json(getAutoOptimizerStatus(getDb(), trackId));
 });
 
 function getLanAddresses(): string[] {
@@ -674,7 +934,15 @@ if (fs.existsSync(path.join(distPath, 'index.html'))) {
 
 app.listen(PORT, HOST, () => {
   const db = getDb();
+  const driverBackfill = backfillDriverV85WinPct(db);
+  if (driverBackfill.entriesUpdated > 0) {
+    console.log(`Kusk %: ${driverBackfill.entriesUpdated} rader synkade från cache`);
+    for (const sessionId of driverBackfill.sessionIds) {
+      recalculateSessionScores(sessionId);
+    }
+  }
   startStatsSyncJob(() => db);
+  startTrainerBackfillJob(() => db);
   startAutoOptimizeJob(() => db);
   startEarningsRefreshJob(() => db);
   console.log(`TrotLab API på http://localhost:${PORT}`);

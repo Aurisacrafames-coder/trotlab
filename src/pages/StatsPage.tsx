@@ -88,6 +88,13 @@ export default function StatsPage() {
   return (
     <>
       <div className="card">
+        <p className="muted">
+          <Link to="/statistik/kusk-tranare">Kusk- & tränarstatistik →</Link>
+          {' '}
+          Verifiera vinst% och se vilka lopp siffrorna bygger på.
+        </p>
+      </div>
+      <div className="card">
         <h2>Filter</h2>
         <div className="backtest-filters">
           <label className="backtest-field">

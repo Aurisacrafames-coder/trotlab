@@ -29,8 +29,9 @@ export function recalculateSessionScores(
 
   const entries = db
     .prepare(
-      `SELECT id, start_points, earnings_per_start, post_position, volte_row,
-              driver_v85_win_pct, track_post_win_pct
+      `SELECT id, start_points, earnings_per_start, post_position, volte_row, start_distance,
+              driver_track_win_pct, driver_global_win_pct, driver_v85_win_pct_override,
+              trainer_win_pct, trainer_win_pct_override, track_post_win_pct, scratched
        FROM race_entries WHERE session_id = ?`,
     )
     .all(sessionId) as Array<{
@@ -39,8 +40,14 @@ export function recalculateSessionScores(
     earnings_per_start: number | null;
     post_position: number | null;
     volte_row: 'front' | 'back' | null;
-    driver_v85_win_pct: number | null;
+    start_distance: number | null;
+    driver_track_win_pct: number | null;
+    driver_global_win_pct: number | null;
+    driver_v85_win_pct_override: number | null;
+    trainer_win_pct: number | null;
+    trainer_win_pct_override: number | null;
     track_post_win_pct: number | null;
+    scratched: number;
   }>;
 
   const updateTrackPct = db.prepare(
@@ -49,11 +56,13 @@ export function recalculateSessionScores(
 
   if (sessionMeta?.atgTrackId) {
     for (const entry of entries) {
+      if (entry.scratched) continue;
       const pct = getTrackPostWinPercentCached(
         sessionMeta.atgTrackId,
         entry.post_position,
         sessionMeta.startMethod,
         db,
+        entry.volte_row === 'front' || entry.volte_row === 'back' ? entry.volte_row : null,
       );
       entry.track_post_win_pct = pct;
       updateTrackPct.run(pct, entry.id);
@@ -66,17 +75,38 @@ export function recalculateSessionScores(
     ON CONFLICT(entry_id, parameter_id) DO UPDATE SET score = excluded.score
   `);
 
-  const fieldStartPoints = entries.map((e) => e.start_points);
-  const fieldEarningsPerStart = entries.map((e) => e.earnings_per_start);
+  const activeEntries = entries.filter((e) => !e.scratched);
+  const fieldStartPoints = activeEntries.map((e) => e.start_points);
+  const fieldEarningsPerStart = activeEntries.map((e) => e.earnings_per_start);
+  const fieldStartDistances = activeEntries.map((e) => e.start_distance);
 
   for (const entry of entries) {
+    if (entry.scratched) {
+      for (const param of parameters) {
+        upsertEntryScore.run(entry.id, param.id, 0);
+      }
+      updateScore.run(0, entry.id);
+      continue;
+    }
+
     const formStarts = db
       .prepare(
-        `SELECT date, place FROM form_starts WHERE entry_id = ? ORDER BY form_order`,
+        `SELECT date, place, km_time as kmTime, prize_first as prizeFirst,
+                is_record_time as isRecordTime
+         FROM form_starts WHERE entry_id = ? ORDER BY form_order`,
       )
-      .all(entry.id) as Array<{ date: string | null; place: string | null }>;
+      .all(entry.id) as Array<{
+        date: string | null;
+        place: string | null;
+        kmTime: string | null;
+        prizeFirst: number | null;
+        isRecordTime: number | boolean | null;
+      }>;
 
-    const latestForm = formStarts[0];
+    const recentFormStarts = formStarts.slice(0, 2).map((row) => ({
+      ...row,
+      isRecordTime: Boolean(row.isRecordTime),
+    }));
 
     const manualParamIds = new Set(
       parameters.filter((p) => !p.autoKey).map((p) => p.id),
@@ -101,11 +131,16 @@ export function recalculateSessionScores(
         formPlace: formPlaceScore,
         postPosition: entry.post_position,
         startMethod: sessionMeta?.startMethod ?? null,
-        fieldSize: entries.length || 12,
+        fieldSize: activeEntries.length || 12,
         volteRow: entry.volte_row,
-        driverV85WinPct: entry.driver_v85_win_pct,
+        startDistance: entry.start_distance,
+        fieldStartDistances,
+        driverTrackWinPct: entry.driver_track_win_pct,
+        driverGlobalWinPct: entry.driver_global_win_pct,
+        driverWinPctOverride: entry.driver_v85_win_pct_override,
+        trainerWinPct: entry.trainer_win_pct_override ?? entry.trainer_win_pct,
         trackPostWinPct: entry.track_post_win_pct,
-        recentFormStart: latestForm ?? null,
+        recentFormStarts,
         raceDate: sessionMeta?.raceDate ?? '',
         manualScores,
       },

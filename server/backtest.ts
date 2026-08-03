@@ -8,7 +8,8 @@ import type {
   BacktestTrackOption,
   Parameter,
 } from '../shared/types.js';
-import { VARMNING_PARAMETER_ID } from '../shared/types.js';
+import { OPTIMIZE_TRIALS_DEFAULT, VARMNING_PARAMETER_ID } from '../shared/types.js';
+import { listTrackStats } from './trackStats.js';
 
 export type { BacktestGoal, BacktestOptimizeResult, BacktestRaceDetail, BacktestSummary, BacktestTrackOption };
 
@@ -44,10 +45,15 @@ interface ScoredBacktest extends BacktestSummary {
 const COARSE_STEP = 5;
 const FINE_STEP = 1;
 const RANDOM_RESTARTS = 8;
+const WEIGHT_SEARCH_RADIUS = 50;
 const MIN_TOTAL_WEIGHT = 50;
 const MIN_ACTIVE_PARAMS = 3;
 const MIN_WEIGHT_FOR_ACTIVE = 5;
-const MAX_TRIALS_DEFAULT = 5000;
+
+export function normalizeMaxTrials(value: number | undefined): number {
+  if (value == null || !Number.isFinite(value)) return OPTIMIZE_TRIALS_DEFAULT;
+  return Math.min(100_000, Math.max(1_000, Math.round(value)));
+}
 
 export interface OptimizeProgress {
   trialsRun: number;
@@ -96,12 +102,12 @@ function weightCandidates(param: Parameter, baselineWeight: number, step: number
   const values = new Set<number>();
 
   if (baselineWeight >= MIN_WEIGHT_FOR_ACTIVE) {
-    const lo = Math.max(MIN_WEIGHT_FOR_ACTIVE, baselineWeight - 25);
-    const hi = Math.min(100, baselineWeight + 25);
+    const lo = Math.max(MIN_WEIGHT_FOR_ACTIVE, baselineWeight - WEIGHT_SEARCH_RADIUS);
+    const hi = Math.min(100, baselineWeight + WEIGHT_SEARCH_RADIUS);
     for (let w = lo; w <= hi; w += step) values.add(w);
   } else {
     values.add(0);
-    for (let w = MIN_WEIGHT_FOR_ACTIVE; w <= 30; w += step) values.add(w);
+    for (let w = MIN_WEIGHT_FOR_ACTIVE; w <= WEIGHT_SEARCH_RADIUS; w += step) values.add(w);
   }
 
   values.add(param.weight);
@@ -241,7 +247,13 @@ function loadEntryScores(
   sessionIds: number[],
 ): Map<
   number,
-  Array<{ startNumber: number; horseName: string; actualPosition: number | null; scores: Record<string, number> }>
+  Array<{
+    startNumber: number;
+    horseName: string;
+    actualPosition: number | null;
+    scratched: boolean;
+    scores: Record<string, number>;
+  }>
 > {
   if (sessionIds.length === 0) return new Map();
 
@@ -250,16 +262,28 @@ function loadEntryScores(
     .prepare(
       `SELECT re.session_id as sessionId, re.start_number as startNumber,
               re.horse_name as horseName, re.actual_position as actualPosition,
+              re.scratched as scratched,
               es.parameter_id as parameterId, es.score
        FROM race_entries re
        JOIN entry_scores es ON es.entry_id = re.id
        WHERE re.session_id IN (${placeholders})`,
     )
-    .all(...sessionIds) as EntryRow[];
+    .all(...sessionIds) as Array<
+    EntryRow & { scratched: number }
+  >;
 
   const bySession = new Map<
     number,
-    Map<number, { startNumber: number; horseName: string; actualPosition: number | null; scores: Record<string, number> }>
+    Map<
+      number,
+      {
+        startNumber: number;
+        horseName: string;
+        actualPosition: number | null;
+        scratched: boolean;
+        scores: Record<string, number>;
+      }
+    >
   >();
 
   for (const row of rows) {
@@ -274,6 +298,7 @@ function loadEntryScores(
         startNumber: row.startNumber,
         horseName: row.horseName,
         actualPosition: row.actualPosition,
+        scratched: row.scratched === 1,
         scores: {},
       };
       session.set(row.startNumber, entry);
@@ -283,7 +308,13 @@ function loadEntryScores(
 
   const result = new Map<
     number,
-    Array<{ startNumber: number; horseName: string; actualPosition: number | null; scores: Record<string, number> }>
+    Array<{
+      startNumber: number;
+      horseName: string;
+      actualPosition: number | null;
+      scratched: boolean;
+      scores: Record<string, number>;
+    }>
   >();
   for (const [sessionId, entries] of bySession) {
     result.set(sessionId, [...entries.values()]);
@@ -296,16 +327,19 @@ function scoreEntries(
     startNumber: number;
     horseName: string;
     actualPosition: number | null;
+    scratched?: boolean;
     scores: Record<string, number>;
   }>,
   parameters: Parameter[],
 ) {
   const scored = entries.map((entry) => ({
     ...entry,
+    scratched: entry.scratched ?? false,
     trotScore: calculateTrotScore(entry.scores, parameters),
   }));
 
   scored.sort((a, b) => {
+    if (a.scratched !== b.scratched) return a.scratched ? 1 : -1;
     if (b.trotScore !== a.trotScore) return b.trotScore - a.trotScore;
     return a.startNumber - b.startNumber;
   });
@@ -384,34 +418,7 @@ function runBacktestInternal(
 }
 
 export function listBacktestTracks(db: Database.Database): BacktestTrackOption[] {
-  const rows = db
-    .prepare(
-      `SELECT rs.atg_track_id as atgTrackId, rs.track_name as trackName,
-              COUNT(*) as raceCount,
-              SUM(CASE
-                WHEN EXISTS (
-                  SELECT 1 FROM race_entries re
-                  WHERE re.session_id = rs.id AND re.actual_position IS NOT NULL AND re.actual_position > 0
-                ) THEN 1 ELSE 0
-              END) as racesWithResult
-       FROM race_sessions rs
-       WHERE rs.atg_track_id IS NOT NULL
-       GROUP BY rs.atg_track_id, rs.track_name
-       ORDER BY racesWithResult DESC, trackName`,
-    )
-    .all() as Array<{
-    atgTrackId: number;
-    trackName: string;
-    raceCount: number;
-    racesWithResult: number;
-  }>;
-
-  return rows.map((r) => ({
-    atgTrackId: r.atgTrackId,
-    trackName: r.trackName,
-    raceCount: r.raceCount,
-    racesWithResult: r.racesWithResult,
-  }));
+  return listTrackStats(db);
 }
 
 export function runBacktest(
@@ -486,6 +493,8 @@ export function optimizeWeights(
       hitsGained: 0,
       improved: false,
       message: 'Inga lopp med resultat att optimera mot.',
+      trialsRun: 0,
+      maxTrials: normalizeMaxTrials(options?.maxTrials),
     };
   }
 
@@ -499,7 +508,7 @@ export function optimizeWeights(
   const baselineById = new Map(baselineWeights.map((p) => [p.id, p.weight]));
   const state = {
     trialsRun: 0,
-    maxTrials: options?.maxTrials ?? MAX_TRIALS_DEFAULT,
+    maxTrials: normalizeMaxTrials(options?.maxTrials),
   };
 
   let best = baselineFull;
@@ -573,8 +582,10 @@ export function optimizeWeights(
     hitsGained: (improved ? best : baselineFull).hits - baselineFull.hits,
     improved,
     message: improved
-      ? `Hittade bättre vikter efter ${state.trialsRun} testade alternativ.`
-      : `Ingen bättre viktuppsättning hittades efter ${state.trialsRun} testade alternativ — behåll nuvarande inställningar.`,
+      ? `Hittade bättre vikter efter ${state.trialsRun} testade alternativ (max ${state.maxTrials}).`
+      : `Ingen bättre viktuppsättning hittades efter ${state.trialsRun} testade alternativ (max ${state.maxTrials}) — behåll nuvarande inställningar.`,
+    trialsRun: state.trialsRun,
+    maxTrials: state.maxTrials,
   };
 }
 

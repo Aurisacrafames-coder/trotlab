@@ -1,4 +1,5 @@
 import type { Parameter } from '../shared/types.js';
+import { effectiveFormPlace, resolveRecentWinIsRecordTime, RECENT_WIN_HIGH_PRIZE_KR } from './format.js';
 
 export type StartMethod = 'auto' | 'volte' | string | null;
 
@@ -17,20 +18,52 @@ export function formatStartMethodLabel(method: StartMethod): string | null {
   return method ? String(method) : null;
 }
 
+export type VolteRow = 'front' | 'back';
+
+/** Fram- eller bakspår i volt utifrån startdistans jämfört med fältets kortaste. */
+export function volteRowFromDistance(
+  startMethod: StartMethod,
+  distance: number | null,
+  fieldDistances: Array<number | null>,
+): VolteRow | null {
+  if (normalizeStartMethod(startMethod) !== 'volte') return null;
+  if (distance == null) return null;
+  const numeric = fieldDistances.filter((d): d is number => d != null);
+  if (numeric.length === 0) return null;
+  return distance > Math.min(...numeric) ? 'back' : 'front';
+}
+
+/** Cache-/lookup-nyckel för spårvinst% (autostart = tom sträng). */
+export function trackPostVolteRowKey(volteRow: VolteRow | null | undefined): string {
+  return volteRow ?? '';
+}
+
 export interface ScoreInput {
   startPoints: number | null;
   earningsPerStart: number | null;
   /** All horses in the race — used for field-relative class scoring. */
   fieldStartPoints?: Array<number | null>;
   fieldEarningsPerStart?: Array<number | null>;
+  startDistance: number | null;
+  /** All horses' start distances — for volt handicap penalty. */
+  fieldStartDistances?: Array<number | null>;
   formPlace: number | null;
   postPosition: number | null;
   startMethod?: StartMethod;
   fieldSize?: number;
   volteRow?: 'front' | 'back' | null;
-  driverV85WinPct: number | null;
+  driverTrackWinPct: number | null;
+  driverGlobalWinPct: number | null;
+  driverWinPctOverride: number | null;
   trackPostWinPct: number | null;
-  recentFormStart?: { date: string | null; place: string | null } | null;
+  trainerWinPct: number | null;
+  recentFormStarts?: Array<{
+    date: string | null;
+    place: string | null;
+    kmTime?: string | null;
+    prizeFirst?: number | null;
+    isRecordTime?: boolean | null;
+  }>;
   raceDate?: string;
   manualScores: Record<string, number>;
 }
@@ -122,6 +155,10 @@ export function autoEarningsPerStart(
 
 const FORM_LOOKBACK_MONTHS = 4;
 const RECENT_WIN_LOOKBACK_MONTHS = 2;
+/** Extra poäng on top of base win score when latest win was a record time or two wins in a row. */
+export const RECENT_WIN_RECORD_BONUS = 2;
+/** Meters behind shortest mark before start-distance penalty applies. */
+export const START_DISTANCE_PENALTY_THRESHOLD_M = 20;
 
 export { FORM_LOOKBACK_MONTHS };
 
@@ -154,19 +191,19 @@ export function formConfidenceForStartCount(startCount: number): number {
 }
 
 export function isFormStartQualifying(
-  start: { date: string | null; place: string | null },
+  start: { date: string | null; place: string | null; kmTime?: string | null },
   raceDate: string,
 ): boolean {
+  const place = effectiveFormPlace(start.place, start.kmTime);
   return Boolean(
     start.date &&
-      start.place != null &&
-      start.place !== '' &&
+      place != null &&
       isStartWithinLookback(start.date, raceDate, FORM_LOOKBACK_MONTHS),
   );
 }
 
 export function countQualifyingFormStarts(
-  starts: Array<{ date: string | null; place: string | null }>,
+  starts: Array<{ date: string | null; place: string | null; kmTime?: string | null }>,
   raceDate: string,
 ): number {
   return starts.filter((s) => isFormStartQualifying(s, raceDate)).slice(0, 5).length;
@@ -174,7 +211,7 @@ export function countQualifyingFormStarts(
 
 /** Average placement from recent starts within lookback months (max 5): 1st=10 … galopp=1 */
 export function autoFormPlace(
-  starts: Array<{ date: string | null; place: string | null }>,
+  starts: Array<{ date: string | null; place: string | null; kmTime?: string | null }>,
   raceDate: string,
 ): number {
   const recent = starts
@@ -184,7 +221,9 @@ export function autoFormPlace(
   if (recent.length === 0) return FORM_NEUTRAL_SCORE;
 
   const rawAverage =
-    recent.map((s) => placeToFormScore(s.place!)).reduce((a, b) => a + b, 0) / recent.length;
+    recent
+      .map((s) => placeToFormScore(effectiveFormPlace(s.place, s.kmTime)!))
+      .reduce((a, b) => a + b, 0) / recent.length;
 
   const confidence = formConfidenceForStartCount(recent.length);
   const blended = rawAverage * confidence + FORM_NEUTRAL_SCORE * (1 - confidence);
@@ -214,10 +253,47 @@ export function autoPostPosition(
   return clamp(10 - penalty, 0, 10);
 }
 
-/** Map kusk vinst% in spelform (typical 0–25) to 0–10 */
+/** Share of track vs global when combining kusk vinst% to a score. */
+export const DRIVER_TRACK_WIN_WEIGHT = 0.6;
+export const DRIVER_GLOBAL_WIN_WEIGHT = 0.4;
+
+/** Map kusk/tränare vinst% (typical 0–25) to 0–10 */
 export function autoDriverV85Win(winPercent: number | null): number {
   if (winPercent == null) return 5;
   return clamp((winPercent / 25) * 10, 0, 10);
+}
+
+/** Combine bana + totalt kusk vinst% till en poäng (0–10). */
+export function autoDriverWinCombined(
+  trackPct: number | null,
+  globalPct: number | null,
+): number {
+  const trackScore = autoDriverV85Win(trackPct);
+  const globalScore = autoDriverV85Win(globalPct);
+
+  if (trackPct != null && globalPct != null) {
+    return (
+      trackScore * DRIVER_TRACK_WIN_WEIGHT + globalScore * DRIVER_GLOBAL_WIN_WEIGHT
+    );
+  }
+  if (trackPct != null) return trackScore;
+  if (globalPct != null) return globalScore;
+  return 5;
+}
+
+export function autoDriverWinScore(input: {
+  driverTrackWinPct: number | null;
+  driverGlobalWinPct: number | null;
+  driverWinPctOverride: number | null;
+}): number {
+  if (input.driverWinPctOverride != null) {
+    return autoDriverV85Win(input.driverWinPctOverride);
+  }
+  return autoDriverWinCombined(input.driverTrackWinPct, input.driverGlobalWinPct);
+}
+
+export function autoTrainerWin(winPercent: number | null): number {
+  return autoDriverV85Win(winPercent);
 }
 
 /** Map track lane win % (typical 0–20) to 0–10 */
@@ -226,19 +302,67 @@ export function autoTrackPostWin(winPercent: number | null): number {
   return clamp((winPercent / 20) * 10, 0, 10);
 }
 
-/** 10 if latest start was a win within lookback months before race day, else 0 */
-export function autoRecentWin(
-  latestStart: { date: string | null; place: string | null } | null | undefined,
+/** Graded score if latest start was a win within lookback months before race day, else 0. */
+function isRecentWinStart(
+  start:
+    | {
+        date: string | null;
+        place: string | null;
+        kmTime?: string | null;
+      }
+    | null
+    | undefined,
   raceDate: string,
+): boolean {
+  const placeStr = effectiveFormPlace(start?.place, start?.kmTime);
+  if (!start?.date || placeStr == null) return false;
+  const place = parseInt(placeStr, 10);
+  if (place !== 1) return false;
+  return isStartWithinLookback(start.date, raceDate, RECENT_WIN_LOOKBACK_MONTHS);
+}
+
+export function autoRecentWin(
+  latestStart: {
+    date: string | null;
+    place: string | null;
+    kmTime?: string | null;
+    prizeFirst?: number | null;
+    isRecordTime?: boolean | null;
+  } | null | undefined,
+  raceDate: string,
+  previousStart?: {
+    date: string | null;
+    place: string | null;
+    kmTime?: string | null;
+    prizeFirst?: number | null;
+    isRecordTime?: boolean | null;
+  } | null,
 ): number {
-  if (!latestStart?.date || latestStart.place == null || latestStart.place === '') return 0;
+  if (!isRecentWinStart(latestStart, raceDate)) return 0;
 
-  const place = parseInt(latestStart.place, 10);
-  if (place !== 1) return 0;
+  const highPrize = (latestStart!.prizeFirst ?? 0) >= RECENT_WIN_HIGH_PRIZE_KR;
+  const record = resolveRecentWinIsRecordTime(latestStart!);
+  const twoWinsInRow = isRecentWinStart(previousStart, raceDate);
+  const base = highPrize ? 7 : 3;
+  if (!record && !twoWinsInRow) return base;
+  return Math.min(10, base + RECENT_WIN_RECORD_BONUS);
+}
 
-  if (!isStartWithinLookback(latestStart.date, raceDate, RECENT_WIN_LOOKBACK_MONTHS)) return 0;
+/** Score 0–10 for volt/autostart distance handicap vs shortest mark in the field. */
+export function autoStartDistancePenalty(
+  startDistance: number | null,
+  field?: Array<number | null>,
+): number {
+  if (startDistance == null) return FORM_NEUTRAL_SCORE;
 
-  return 10;
+  const distances = field?.filter((d): d is number => d != null) ?? [];
+  if (distances.length === 0) return FORM_NEUTRAL_SCORE;
+
+  const extra = startDistance - Math.min(...distances);
+  if (extra < START_DISTANCE_PENALTY_THRESHOLD_M) return FORM_NEUTRAL_SCORE;
+  if (extra >= 40) return 2;
+  if (extra >= 30) return 3;
+  return 4;
 }
 
 export function buildAutoScores(input: ScoreInput, parameters: Parameter[]): Record<string, number> {
@@ -261,13 +385,30 @@ export function buildAutoScores(input: ScoreInput, parameters: Parameter[]): Rec
         scores[param.id] = input.formPlace ?? 5;
         break;
       case 'driverV85Win':
-        scores[param.id] = autoDriverV85Win(input.driverV85WinPct);
+        scores[param.id] = autoDriverWinScore({
+          driverTrackWinPct: input.driverTrackWinPct,
+          driverGlobalWinPct: input.driverGlobalWinPct,
+          driverWinPctOverride: input.driverWinPctOverride,
+        });
+        break;
+      case 'trainerWin':
+        scores[param.id] = autoTrainerWin(input.trainerWinPct);
         break;
       case 'trackPostWin':
         scores[param.id] = autoTrackPostWin(input.trackPostWinPct);
         break;
       case 'recentWin':
-        scores[param.id] = autoRecentWin(input.recentFormStart, input.raceDate ?? '');
+        scores[param.id] = autoRecentWin(
+          input.recentFormStarts?.[0],
+          input.raceDate ?? '',
+          input.recentFormStarts?.[1],
+        );
+        break;
+      case 'startDistancePenalty':
+        scores[param.id] = autoStartDistancePenalty(
+          input.startDistance,
+          input.fieldStartDistances,
+        );
         break;
     }
   }

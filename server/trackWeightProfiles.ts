@@ -1,24 +1,33 @@
 import type Database from 'better-sqlite3';
 import type { Parameter, TrackProfileSummary } from '../shared/types.js';
-import { getParameters } from './parameters.js';
+import { getParameters, mergeParametersWithGlobal } from './parameters.js';
 import { recalculateSessionScores } from './sessionScores.js';
+import { listTrackStats } from './trackStats.js';
 
 export function listTrackProfiles(db: Database.Database): TrackProfileSummary[] {
-  return db
+  const statsByTrack = new Map(listTrackStats(db).map((t) => [t.atgTrackId, t]));
+  const rows = db
     .prepare(
-      `SELECT m.atg_track_id as atgTrackId, m.track_name as trackName, m.updated_at as updatedAt,
-              (SELECT COUNT(*) FROM race_sessions rs
-               WHERE rs.atg_track_id = m.atg_track_id) as raceCount,
-              (SELECT COUNT(*) FROM race_sessions rs
-               WHERE rs.atg_track_id = m.atg_track_id
-                 AND EXISTS (
-                   SELECT 1 FROM race_entries re
-                   WHERE re.session_id = rs.id AND re.actual_position IS NOT NULL AND re.actual_position > 0
-                 )) as racesWithResult
-       FROM track_profile_meta m
-       ORDER BY m.track_name`,
+      `SELECT atg_track_id as atgTrackId, track_name as trackName, updated_at as updatedAt
+       FROM track_profile_meta
+       ORDER BY track_name`,
     )
-    .all() as TrackProfileSummary[];
+    .all() as Array<{
+    atgTrackId: number;
+    trackName: string;
+    updatedAt: string;
+  }>;
+
+  return rows.map((row) => {
+    const stats = statsByTrack.get(row.atgTrackId);
+    return {
+      atgTrackId: row.atgTrackId,
+      trackName: row.trackName,
+      updatedAt: row.updatedAt,
+      raceCount: stats?.raceCount ?? 0,
+      racesWithResult: stats?.racesWithResult ?? 0,
+    };
+  });
 }
 
 export function hasTrackProfile(db: Database.Database, atgTrackId: number): boolean {
@@ -51,7 +60,7 @@ export function getTrackProfileOrGlobal(
 ): Parameter[] {
   if (atgTrackId != null) {
     const profile = getTrackProfileParameters(db, atgTrackId);
-    if (profile) return profile;
+    if (profile) return mergeParametersWithGlobal(profile, getParameters(db));
   }
   return getParameters(db);
 }

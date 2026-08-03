@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   fetchAutoOptimizerStatus,
   fetchBacktestTracks,
@@ -24,7 +24,7 @@ import type {
   Parameter,
   TrackProfileSummary,
 } from '../../shared/types';
-import { DEFAULT_PARAMETERS } from '../../shared/types';
+import { DEFAULT_PARAMETERS, mergeTrackParameterWeights, OPTIMIZE_TRIAL_OPTIONS, OPTIMIZE_TRIALS_DEFAULT, DEFAULT_BACKTEST_GOAL } from '../../shared/types';
 
 function hitLabel(hit: 'win' | 'top3' | 'miss') {
   if (hit === 'win') return <span className="hit-win">Träff</span>;
@@ -34,17 +34,21 @@ function hitLabel(hit: 'win' | 'top3' | 'miss') {
 
 function AutoOptimizeBanner({
   status,
+  activeProfileTrackId,
+  activeTrackName,
   onApplyWeights,
   onUseResult,
 }: {
   status: AutoOptimizerStatus;
+  activeProfileTrackId: number | null;
+  activeTrackName: string | null;
   onApplyWeights: (weights: Parameter[]) => void;
   onUseResult: (result: BacktestOptimizeResult) => void;
 }) {
   if (status.running) {
     return (
       <div className="auto-opt-banner auto-opt-running">
-        <strong>Optimerar i bakgrunden</strong>
+        <strong>Optimerar {status.trackName ?? 'banan'}</strong>
         <p className="muted" style={{ margin: '0.35rem 0 0' }}>
           {status.message ??
             `Testar viktkombinationer mot ${status.trackName ?? 'banan'}…`}
@@ -66,6 +70,11 @@ function AutoOptimizeBanner({
       return (
         <div className="auto-opt-banner">
           <p className="muted" style={{ margin: 0 }}>{status.message}</p>
+          {activeTrackName && activeProfileTrackId != null && (
+            <p className="muted" style={{ margin: '0.5rem 0 0' }}>
+              Kör <strong>Optimera {activeTrackName} i bakgrunden</strong> nedan när du har minst 3 lopp med resultat.
+            </p>
+          )}
         </div>
       );
     }
@@ -75,11 +84,10 @@ function AutoOptimizeBanner({
   const result = status.lastResult;
   return (
     <div className="auto-opt-banner auto-opt-done">
-      <strong>Automatisk optimering klar</strong>
+      <strong>Optimering klar — {result.trackName}</strong>
       {status.lastRunAt && (
         <p className="muted" style={{ margin: '0.35rem 0 0' }}>
           Senast körd {new Date(status.lastRunAt).toLocaleString('sv-SE')}
-          {status.trackName ? ` · ${status.trackName}` : ''}
           {status.goal === 'win' ? ' · vinstträff' : ' · topp 3-träff'}
         </p>
       )}
@@ -124,18 +132,25 @@ function AutoOptimizeBanner({
 
 function BacktestPanel({
   params,
+  profileMode,
   profileTrackId,
+  activeTrackName,
   onApplyWeights,
+  onSelectProfileTrack,
 }: {
   params: Parameter[];
+  profileMode: 'global' | number;
   profileTrackId: number | null;
+  activeTrackName: string | null;
   onApplyWeights: (weights: Parameter[]) => void;
+  onSelectProfileTrack: (atgTrackId: number) => void;
 }) {
   const [tracks, setTracks] = useState<BacktestTrackOption[]>([]);
   const [tracksLoading, setTracksLoading] = useState(true);
   const [atgTrackId, setAtgTrackId] = useState<number | ''>('');
   const [startMethod, setStartMethod] = useState<'' | 'auto' | 'volte'>('');
-  const [goal, setGoal] = useState<BacktestGoal>('top3');
+  const [goal, setGoal] = useState<BacktestGoal>(DEFAULT_BACKTEST_GOAL);
+  const [maxTrials, setMaxTrials] = useState<number>(OPTIMIZE_TRIALS_DEFAULT);
   const [running, setRunning] = useState(false);
   const [optimizing, setOptimizing] = useState(false);
   const [runResult, setRunResult] = useState<BacktestSummary | null>(null);
@@ -151,17 +166,29 @@ function BacktestPanel({
           setAtgTrackId(profileTrackId);
         } else if (list.length === 1) {
           setAtgTrackId(list[0].atgTrackId);
+        } else if (profileTrackId == null) {
+          setAtgTrackId('');
         }
       })
       .finally(() => setTracksLoading(false));
   }, [profileTrackId]);
 
   useEffect(() => {
+    if (profileTrackId != null) {
+      setAtgTrackId(profileTrackId);
+    }
+  }, [profileTrackId]);
+
+  useEffect(() => {
     let cancelled = false;
+    const trackFilter =
+      profileTrackId ?? (atgTrackId === '' ? undefined : Number(atgTrackId));
+
+    setAutoStatus(null);
 
     async function pollAutoStatus() {
       try {
-        const status = await fetchAutoOptimizerStatus();
+        const status = await fetchAutoOptimizerStatus(trackFilter);
         if (!cancelled) setAutoStatus(status);
       } catch {
         // ignore polling errors
@@ -174,9 +201,12 @@ function BacktestPanel({
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [profileTrackId, atgTrackId]);
 
   const selectedTrack = tracks.find((t) => t.atgTrackId === atgTrackId);
+  const workingTrackName =
+    profileTrackId != null ? activeTrackName : selectedTrack?.trackName ?? null;
+  const canOptimize = atgTrackId !== '' && (selectedTrack?.racesWithResult ?? 0) >= 3;
   const filterBody = {
     atgTrackId: Number(atgTrackId),
     startMethod: startMethod || null,
@@ -206,7 +236,7 @@ function BacktestPanel({
     setRunResult(null);
     setOptimizeResult(null);
     try {
-      const result = await optimizeBacktest(filterBody);
+      const result = await optimizeBacktest({ ...filterBody, maxTrials });
       setOptimizeResult(result);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Optimering misslyckades');
@@ -221,21 +251,44 @@ function BacktestPanel({
 
   return (
     <>
+      <ol className="settings-workflow muted">
+        <li>Välj bana ovan (inte &quot;Global standard&quot; om du vill optimera en specifik bana).</li>
+        <li>Testa eller optimera vikter mot importerade lopp med resultat.</li>
+        <li>Klicka <strong>Använd föreslagna vikter</strong> — reglagen fylls i ovan.</li>
+        <li>Klicka <strong>Spara …-profil</strong> längst upp för att aktivera.</li>
+      </ol>
+
+      {profileMode === 'global' && (
+        <p className="profile-context-box">
+          Du redigerar <strong>global standard</strong>. Välj t.ex. Tingsryd ovan om du vill spara egna vikter per bana.
+        </p>
+      )}
+
+      {profileTrackId != null && workingTrackName && (
+        <p className="profile-context-box">
+          Optimering och test gäller <strong>{workingTrackName}</strong>
+          {selectedTrack
+            ? ` · ${selectedTrack.racesWithResult} lopp med resultat i databasen`
+            : ' · inga importerade lopp ännu — '}
+          {!selectedTrack && <Link to="/import">importera historik</Link>}
+        </p>
+      )}
+
       <p className="muted" style={{ marginTop: 0 }}>
-        Testa dina vikter mot importerade lopp med resultat på samma bana.
         Träff räknas om <strong>någon av de tre hästar med högst Trot Score</strong> vunnit
-        (vinstmål) eller kommit topp 3 (topp 3-mål).
-        Appen optimerar automatiskt i bakgrunden när du importerar lopp eller hämtar resultat.
-        Värmning exkluderas (kräver manuell markering).
+        (vinstmål) eller kommit topp 3 (topp 3-mål). Värmning exkluderas.
       </p>
 
       {autoStatus && (
         <AutoOptimizeBanner
           status={autoStatus}
+          activeProfileTrackId={profileTrackId}
+          activeTrackName={activeTrackName}
           onApplyWeights={onApplyWeights}
           onUseResult={(result) => {
             setOptimizeResult(result);
             setAtgTrackId(result.atgTrackId);
+            onSelectProfileTrack(result.atgTrackId);
           }}
         />
       )}
@@ -243,28 +296,37 @@ function BacktestPanel({
       {tracks.length === 0 ? (
         <p className="muted">
           Inga banor med importerade lopp ännu. Gå till{' '}
-          <Link to="/import">Importera</Link> och hämta historik (senaste 6 månaderna) för banan du vill optimera.
+          <Link to="/import">Importera</Link> och hämta historik för banan du vill optimera.
+        </p>
+      ) : profileTrackId != null && !selectedTrack ? (
+        <p className="backtest-warn">
+          {workingTrackName ?? 'Banan'} finns i listan men har inga importerade lopp ännu.
+          {' '}<Link to="/import">Importera historik</Link> under Importera (bulk-import) innan du kan optimera.
         </p>
       ) : (
         <>
-          <div className="backtest-filters">
-            <label className="backtest-field">
-              <span className="muted">Bana</span>
-              <select
-                value={atgTrackId}
-                onChange={(e) =>
-                  setAtgTrackId(e.target.value ? Number(e.target.value) : '')
-                }
-              >
-                <option value="">Välj bana…</option>
-                {tracks.map((t) => (
-                  <option key={t.atgTrackId} value={t.atgTrackId}>
-                    {t.trackName} ({t.racesWithResult}/{t.raceCount} med resultat)
-                  </option>
-                ))}
-              </select>
-            </label>
+          {profileMode === 'global' && (
+            <div className="backtest-filters">
+              <label className="backtest-field">
+                <span className="muted">Bana att testa</span>
+                <select
+                  value={atgTrackId}
+                  onChange={(e) =>
+                    setAtgTrackId(e.target.value ? Number(e.target.value) : '')
+                  }
+                >
+                  <option value="">Välj bana…</option>
+                  {tracks.map((t) => (
+                    <option key={t.atgTrackId} value={t.atgTrackId}>
+                      {t.trackName} ({t.racesWithResult}/{t.raceCount} med resultat)
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          )}
 
+          <div className="backtest-filters">
             <label className="backtest-field">
               <span className="muted">Startmetod</span>
               <select
@@ -283,39 +345,74 @@ function BacktestPanel({
                 value={goal}
                 onChange={(e) => setGoal(e.target.value as BacktestGoal)}
               >
-                <option value="top3">Topp 3-träff</option>
                 <option value="win">Vinstträff</option>
+                <option value="top3">Topp 3-träff</option>
+              </select>
+            </label>
+
+            <label className="backtest-field">
+              <span className="muted">Optimeringsförsök</span>
+              <select
+                value={maxTrials}
+                onChange={(e) => setMaxTrials(Number(e.target.value))}
+                disabled={running || optimizing || autoStatus?.running}
+              >
+                {OPTIMIZE_TRIAL_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
               </select>
             </label>
           </div>
+
+          {(() => {
+            const selected = OPTIMIZE_TRIAL_OPTIONS.find((o) => o.value === maxTrials);
+            return selected ? (
+              <p className="muted" style={{ marginTop: '-0.25rem' }}>
+                {selected.hint}. Fler försök ökar chansen att hitta bättre vikter men tar längre tid.
+              </p>
+            ) : null;
+          })()}
 
           <div className="backtest-actions">
             <button
               type="button"
               className="secondary"
               onClick={handleRun}
-              disabled={running || optimizing || atgTrackId === '' || !selectedTrack?.racesWithResult}
+              disabled={running || optimizing || !canOptimize}
             >
               {running ? 'Kör…' : 'Testa nuvarande vikter'}
             </button>
             <button
               type="button"
               onClick={handleOptimize}
-              disabled={running || optimizing || atgTrackId === '' || !selectedTrack?.racesWithResult}
+              disabled={running || optimizing || !canOptimize}
             >
-              {optimizing ? 'Optimerar…' : 'Optimera manuellt'}
+              {optimizing
+                ? `Optimerar… (${maxTrials.toLocaleString('sv-SE')} försök)`
+                : 'Optimera manuellt'}
             </button>
             <button
               type="button"
               className="secondary"
-              onClick={() => runAutoOptimizer(goal).then(setAutoStatus)}
-              disabled={running || optimizing || autoStatus?.running || !selectedTrack?.racesWithResult}
+              onClick={() => {
+                if (atgTrackId === '') return;
+                runAutoOptimizer(goal, Number(atgTrackId), maxTrials).then(setAutoStatus);
+              }}
+              disabled={running || optimizing || autoStatus?.running || !canOptimize}
             >
-              Kör bakgrundsoptimering
+              {autoStatus?.running ? 'Optimerar…' : `Optimera ${workingTrackName ?? 'banan'} i bakgrunden`}
             </button>
           </div>
 
-          {selectedTrack && selectedTrack.racesWithResult < 5 && (
+          {!canOptimize && selectedTrack && selectedTrack.racesWithResult > 0 && selectedTrack.racesWithResult < 3 && (
+            <p className="backtest-warn">
+              Minst 3 lopp med resultat krävs för optimering ({selectedTrack.racesWithResult} hittills).
+            </p>
+          )}
+
+          {selectedTrack && selectedTrack.racesWithResult >= 3 && selectedTrack.racesWithResult < 5 && (
             <p className="muted backtest-warn">
               Bara {selectedTrack.racesWithResult} lopp med resultat — resultatet kan vara opålitligt.
               Importera fler avslutade omgångar på banan för bättre underlag.
@@ -486,11 +583,17 @@ function BacktestResultCard({
 }
 
 export default function SettingsPage() {
+  const [searchParams] = useSearchParams();
   const [params, setParams] = useState<Parameter[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [profileMode, setProfileMode] = useState<'global' | number>('global');
+  const [profileMode, setProfileMode] = useState<'global' | number>(() => {
+    const bana = searchParams.get('bana');
+    if (!bana) return 'global';
+    const id = Number(bana);
+    return Number.isFinite(id) ? id : 'global';
+  });
   const [knownTracks, setKnownTracks] = useState<KnownTrack[]>([]);
   const [trackProfiles, setTrackProfiles] = useState<TrackProfileSummary[]>([]);
 
@@ -516,8 +619,11 @@ export default function SettingsPage() {
     setMessage(null);
     const load =
       profileMode === 'global'
-        ? fetchParameters()
-        : fetchTrackProfile(profileMode);
+        ? fetchParameters().then((globalParams) => globalParams)
+        : Promise.all([fetchParameters(), fetchTrackProfile(profileMode)]).then(
+            ([globalParams, trackParams]) =>
+              mergeTrackParameterWeights(trackParams, globalParams),
+          );
     load
       .then(setParams)
       .catch((e) => setMessage(e instanceof Error ? e.message : 'Kunde inte ladda vikter'))
@@ -573,14 +679,14 @@ export default function SettingsPage() {
   return (
     <>
       <div className="card">
-        <h2>Parametrar för Trot Score</h2>
+        <h2>1. Viktprofil per bana</h2>
         <p className="muted">
-          Varje parameter får ett poäng 0–10 (räknas ut automatiskt från ATG-data, eller markeras manuellt för Värmning).
-          Du styr hur mycket varje parameter påverkar slutpoängen med en <strong>relativ vikt</strong> (0–100).
+          Varje parameter får poäng 0–10 (auto från ATG, eller manuellt för Värmning).
+          Du styr inflytande med <strong>relativ vikt</strong> (0–100).
         </p>
 
-        <label className="backtest-field" style={{ marginBottom: '1rem' }}>
-          <span className="muted">Viktprofil</span>
+        <label className="backtest-field profile-select-field">
+          <span className="profile-context-label">Aktiv bana</span>
           <select
             value={profileMode === 'global' ? 'global' : String(profileMode)}
             onChange={(e) => {
@@ -588,36 +694,56 @@ export default function SettingsPage() {
               setProfileMode(v === 'global' ? 'global' : Number(v));
             }}
           >
-            <option value="global">Global standard (fallback)</option>
+            <option value="global">Global standard (fallback för alla banor)</option>
             {knownTracks.map((t) => (
               <option key={t.atgTrackId} value={t.atgTrackId}>
                 {t.name}
-                {trackProfiles.some((p) => p.atgTrackId === t.atgTrackId) ? ' ✓' : ''}
               </option>
             ))}
           </select>
         </label>
 
+        <div className="profile-active-banner" aria-live="polite">
+          <div className="profile-active-banner-label">Du redigerar nu</div>
+          <div className="profile-active-banner-name">
+            {profileMode === 'global' ? 'Global standard' : activeTrack?.name ?? 'Bana'}
+          </div>
+          {profileMode !== 'global' && (
+            <div className="profile-active-banner-meta muted">
+              {activeProfileSummary
+                ? `Sparad profil · uppdaterad ${new Date(activeProfileSummary.updatedAt).toLocaleString('sv-SE')}`
+                : 'Ingen sparad profil ännu — justera vikter och spara nedan'}
+            </div>
+          )}
+        </div>
+
+        {trackProfiles.length > 0 && (
+          <p className="muted profile-saved-list">
+            Sparade banprofiler:{' '}
+            {trackProfiles.map((p) => p.trackName).join(', ')}
+            {profileMode !== 'global' && activeTrack && !activeProfileSummary
+              ? ` (${activeTrack.name} saknas här tills du sparar)`
+              : ''}
+          </p>
+        )}
+
         {profileMode === 'global' ? (
           <p className="muted" style={{ marginTop: 0 }}>
-            Används för banor utan egen sparad profil. Skapa banprofiler under val av bana ovan.
+            Används för banor utan egen sparad profil. Välj t.ex. Tingsryd i listan ovan för en ban-specifik profil.
           </p>
         ) : (
           <p className="muted" style={{ marginTop: 0 }}>
             Gäller alla lopp på <strong>{activeTrack?.name}</strong> som inte har sparat tips.
-            {activeProfileSummary ? (
+            {activeProfileSummary && (
               <>
                 {' '}
-                Profil sparad {new Date(activeProfileSummary.updatedAt).toLocaleString('sv-SE')}
-                {' · '}
                 {activeProfileSummary.racesWithResult} lopp med resultat i databasen.
               </>
-            ) : (
+            )}
+            {!activeProfileSummary && (
               <>
                 {' '}
-                Ingen sparad profil ännu — justera vikter och spara, eller optimera via backtest nedan.
-                {' '}
-                <Link to="/import">Importera historik</Link> först om banan saknar data.
+                <Link to="/import">Importera historik</Link> om banan saknar data för optimering.
               </>
             )}
           </p>
@@ -625,10 +751,22 @@ export default function SettingsPage() {
 
         <p className="muted">
           <strong>Form</strong> räknar snitt av upp till 5 starter inom 4 månader före loppdagen.
+          Galopp räknas med (plats 0 → låg formpoäng).
           Få starter drar poängen mot neutral 5 (1 start = 50&nbsp;%, 2 starter = 75&nbsp;%, 3+ = full form).
           Gamla starter utanför fönstret räknas inte.
           <strong> Startpoäng</strong> och <strong>kr/start</strong> räknas per lopp: 70&nbsp;% jämfört med fältet, 30&nbsp;% absolut skala.
-          <strong> Vinst senaste start</strong> ger 10 poäng om senaste formraden är vinst inom 2 månader före loppdagen.
+          <strong> Vinst senaste start</strong> ger poäng om senaste formraden är vinst inom 2 månader före loppdagen:
+          3 (vinst under 70&nbsp;000&nbsp;kr i 1:a pris), 7 (70&nbsp;000&nbsp;kr eller mer), +2 vid rekordtid eller två raka segrar inom samma fönster (max 5 resp. 9).
+          Rekordtid detekteras från ATG (km-tid med r eller hästens livsrekord).
+          {' '}
+          <strong>Startstraff</strong> drar ner poäng vid volt/autostart när hästen står
+          ≥20&nbsp;m bakom kortaste distansen i fältet (neutral 5 under 20&nbsp;m).
+          {' '}
+          <strong>Kusk vinst%</strong> använder två siffror: bana (12 mån på aktuell bana) och totalt (12 mån alla banor).
+          Poäng = 60&nbsp;% bana + 40&nbsp;% totalt (varje siffra mappas 0–25&nbsp;% → 0–10 poäng).
+          {' '}
+          <strong>Tränare vinst%</strong> använder global tränarstat (2 mån, alla banor) —
+          här styr du bara <em>vikten</em> per bana.
         </p>
 
         <div className="weight-info-box">
@@ -668,7 +806,11 @@ export default function SettingsPage() {
           <div key={p.id} className="param-row">
             <div>
               <label htmlFor={`weight-${p.id}`}>{p.name}</label>
-              {p.autoKey ? (
+              {p.autoKey === 'trainerWin' ? (
+                <span className="muted param-auto">
+                  Auto från ATG — global tränarstat (2 mån, alla banor)
+                </span>
+              ) : p.autoKey ? (
                 <span className="muted param-auto">Auto från ATG</span>
               ) : (
                 <span className="muted param-auto">Manuell — markera på loppsidan</span>
@@ -721,6 +863,9 @@ export default function SettingsPage() {
               ? 'Spara global profil'
               : `Spara ${activeTrack?.name ?? 'bana'}-profil`}
         </button>
+        <p className="muted settings-save-hint">
+          Steg 4 efter optimering: spara här för att Trot Score ska använda vikterna på banan.
+        </p>
         <button
           type="button"
           className="secondary"
@@ -748,11 +893,14 @@ export default function SettingsPage() {
       </div>
 
       <div className="card">
-        <h2>Optimera vikter (backtest)</h2>
+        <h2>2. Testa &amp; optimera</h2>
         <BacktestPanel
           params={params}
+          profileMode={profileMode}
           profileTrackId={profileMode === 'global' ? null : profileMode}
+          activeTrackName={activeTrack?.name ?? null}
           onApplyWeights={applySuggestedWeights}
+          onSelectProfileTrack={(atgTrackId) => setProfileMode(atgTrackId)}
         />
       </div>
 

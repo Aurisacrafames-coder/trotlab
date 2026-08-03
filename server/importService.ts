@@ -1,8 +1,9 @@
 import type Database from 'better-sqlite3';
 import { atgFetch, importFromUrl } from './atg.js';
-import { ensureTrackPostStatsForTrack, getDriverV85WinPercentCached, getTrackPostWinPercentCached, prefetchImportStats } from './atgStats.js';
+import { ensureGlobalTrainerCache, ensureTrackPostStatsForTrack, getDriverGlobalWinPercentCached, getDriverTrackWinPercentCached, getTrainerWinPercentCached, getTrackPostWinPercentCached, prefetchImportStats } from './atgStats.js';
 import { findOrCreateGameSession, linkRaceToGameSession } from './gameSessions.js';
 import { recalculateSessionScores } from './sessionScores.js';
+import { invalidateTrackStatsCache } from './trackStats.js';
 
 export interface LegImportTarget {
   url: string;
@@ -131,18 +132,32 @@ export async function persistImportedRace(
   prefetchImportStats(imported.atgTrackId, [], db);
 
   if (imported.atgTrackId != null) {
-    await ensureTrackPostStatsForTrack(db, imported.atgTrackId);
+    const hasDriverTrack = db
+      .prepare('SELECT 1 as ok FROM driver_track_win_stats WHERE track_id = ? LIMIT 1')
+      .get(imported.atgTrackId) as { ok: number } | undefined;
+    await ensureTrackPostStatsForTrack(db, imported.atgTrackId, !hasDriverTrack);
   }
+
+  await ensureGlobalTrainerCache(db);
 
   for (const entry of imported.entries) {
     if (entry.atgDriverId != null) {
-      entry.driverV85WinPct = getDriverV85WinPercentCached(entry.atgDriverId, db);
+      entry.driverTrackWinPct = getDriverTrackWinPercentCached(
+        entry.atgDriverId,
+        imported.atgTrackId,
+        db,
+      );
+      entry.driverGlobalWinPct = getDriverGlobalWinPercentCached(entry.atgDriverId, db);
+    }
+    if (entry.atgTrainerId != null) {
+      entry.trainerWinPct = getTrainerWinPercentCached(entry.atgTrainerId, db);
     }
     entry.trackPostWinPct = getTrackPostWinPercentCached(
       imported.atgTrackId,
       entry.postPosition,
       imported.startMethod,
       db,
+      entry.volteRow,
     );
   }
 
@@ -180,17 +195,17 @@ export async function persistImportedRace(
   const sessionId = Number(sessionResult.lastInsertRowid);
 
   const insertEntry = db.prepare(`
-    INSERT INTO race_entries (session_id, atg_horse_id, atg_driver_id, horse_name, start_number, post_position,
-      start_distance, volte_row, driver_name, start_points, earnings_per_start, horse_sex, career_starts,
-      driver_apprentice, driver_v85_win_pct, bet_distribution_pct, track_post_win_pct, actual_position)
-    VALUES (@sessionId, @atgHorseId, @atgDriverId, @horseName, @startNumber, @postPosition,
-      @startDistance, @volteRow, @driverName, @startPoints, @earningsPerStart, @horseSex, @careerStarts,
-      @driverApprentice, @driverV85WinPct, @betDistributionPct, @trackPostWinPct, @actualPosition)
+    INSERT INTO race_entries (session_id, atg_horse_id, atg_driver_id, atg_trainer_id, horse_name, start_number, post_position,
+      start_distance, volte_row, driver_name, trainer_name, start_points, earnings_per_start, horse_sex, career_starts,
+      driver_apprentice, driver_track_win_pct, driver_global_win_pct, trainer_win_pct, bet_distribution_pct, track_post_win_pct, actual_position, scratched)
+    VALUES (@sessionId, @atgHorseId, @atgDriverId, @atgTrainerId, @horseName, @startNumber, @postPosition,
+      @startDistance, @volteRow, @driverName, @trainerName, @startPoints, @earningsPerStart, @horseSex, @careerStarts,
+      @driverApprentice, @driverTrackWinPct, @driverGlobalWinPct, @trainerWinPct, @betDistributionPct, @trackPostWinPct, @actualPosition, @scratched)
   `);
 
   const insertForm = db.prepare(`
-    INSERT INTO form_starts (entry_id, form_order, date, distance, post_position, km_time, place, driver_name, prize_first, track_name)
-    VALUES (@entryId, @formOrder, @date, @distance, @postPosition, @kmTime, @place, @driverName, @prizeFirst, @trackName)
+    INSERT INTO form_starts (entry_id, form_order, date, distance, post_position, km_time, place, driver_name, prize_first, track_name, is_record_time)
+    VALUES (@entryId, @formOrder, @date, @distance, @postPosition, @kmTime, @place, @driverName, @prizeFirst, @trackName, @isRecordTime)
   `);
 
   for (const e of imported.entries) {
@@ -198,25 +213,34 @@ export async function persistImportedRace(
       sessionId,
       atgHorseId: e.atgHorseId,
       atgDriverId: e.atgDriverId,
+      atgTrainerId: e.atgTrainerId,
       horseName: e.horseName,
       startNumber: e.startNumber,
       postPosition: e.postPosition,
       startDistance: e.startDistance,
       volteRow: e.volteRow,
       driverName: e.driverName,
+      trainerName: e.trainerName,
       startPoints: e.startPoints,
       earningsPerStart: e.earningsPerStart,
       horseSex: e.horseSex,
       careerStarts: e.careerStarts,
       driverApprentice: e.driverApprentice ? 1 : 0,
-      driverV85WinPct: e.driverV85WinPct,
+      driverTrackWinPct: e.driverTrackWinPct,
+      driverGlobalWinPct: e.driverGlobalWinPct,
+      trainerWinPct: e.trainerWinPct,
       betDistributionPct: e.betDistributionPct,
       trackPostWinPct: e.trackPostWinPct,
       actualPosition: e.actualPosition,
+      scratched: e.scratched ? 1 : 0,
     });
     const entryId = Number(entryResult.lastInsertRowid);
     for (const f of e.formStarts) {
-      insertForm.run({ entryId, ...f });
+      insertForm.run({
+        entryId,
+        ...f,
+        isRecordTime: f.isRecordTime ? 1 : 0,
+      });
     }
   }
 
@@ -230,6 +254,7 @@ export async function persistImportedRace(
   });
   linkRaceToGameSession(db, sessionId, gameSessionId);
 
+  invalidateTrackStatsCache();
   return sessionId;
 }
 

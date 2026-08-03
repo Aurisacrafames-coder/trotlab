@@ -6,6 +6,8 @@ import SettingsPage from './pages/SettingsPage';
 import StatsPage from './pages/StatsPage';
 import HomePage from './pages/HomePage';
 import SystemPage from './pages/SystemPage';
+import ComparePage from './pages/ComparePage';
+import StatsVerifyPage from './pages/StatsVerifyPage';
 
 export default function App() {
   return (
@@ -23,6 +25,7 @@ export default function App() {
           </NavLink>
           <NavLink to="/import">Importera</NavLink>
           <NavLink to="/statistik">Statistik</NavLink>
+          <NavLink to="/jämför">Jämför</NavLink>
           <NavLink to="/installningar">Inställningar</NavLink>
         </nav>
       </header>
@@ -33,6 +36,8 @@ export default function App() {
         <Route path="/omgang/:id/system" element={<SystemPage />} />
         <Route path="/lopp/:id" element={<RacePage />} />
         <Route path="/statistik" element={<StatsPage />} />
+        <Route path="/statistik/kusk-tranare" element={<StatsVerifyPage />} />
+        <Route path="/jämför" element={<ComparePage />} />
         <Route path="/installningar" element={<SettingsPage />} />
       </Routes>
     </div>

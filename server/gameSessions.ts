@@ -5,6 +5,7 @@ import { computeSpikeMetrics, pickSpikeSuggestions } from '../shared/spikeSugges
 import { analyzeSystemLeg } from '../shared/systemSuggestions.js';
 import { buildPlanFromSessionLegs } from '../shared/systemOptimizer.js';
 import { loadUserSystem } from './userSystem.js';
+import { getActiveWatchlistIdSet } from './watchlist.js';
 
 export function findOrCreateGameSession(
   db: Database.Database,
@@ -157,18 +158,21 @@ function loadLegSummary(db: Database.Database, sessionId: number): GameSessionLe
   };
 
   const terms = parseRaceTerms(session.raceTerms);
+  const watchedHorseIds = getActiveWatchlistIdSet(db);
 
   const entries = db
     .prepare(
-      `SELECT start_number as startNumber, horse_name as horseName, trot_score as trotScore,
-              actual_position as actualPosition, start_points as startPoints,
-              earnings_per_start as earningsPerStart, horse_sex as horseSex,
-              career_starts as careerStarts, driver_apprentice as driverApprentice
+      `SELECT start_number as startNumber, horse_name as horseName, atg_horse_id as atgHorseId,
+              trot_score as trotScore, actual_position as actualPosition,
+              start_points as startPoints, earnings_per_start as earningsPerStart,
+              horse_sex as horseSex, career_starts as careerStarts,
+              driver_apprentice as driverApprentice, scratched
        FROM race_entries WHERE session_id = ? ORDER BY start_number`,
     )
     .all(sessionId) as Array<{
     startNumber: number;
     horseName: string;
+    atgHorseId: number;
     trotScore: number | null;
     actualPosition: number | null;
     startPoints: number | null;
@@ -176,11 +180,16 @@ function loadLegSummary(db: Database.Database, sessionId: number): GameSessionLe
     horseSex: string | null;
     careerStarts: number | null;
     driverApprentice: number;
+    scratched: number;
   }>;
 
+  const activeEntries = entries.filter((e) => !e.scratched);
   const scored = [...entries]
     .filter((e) => e.trotScore != null)
-    .sort((a, b) => b.trotScore! - a.trotScore! || a.startNumber - b.startNumber);
+    .sort((a, b) => {
+      if (a.scratched !== b.scratched) return a.scratched - b.scratched;
+      return b.trotScore! - a.trotScore! || a.startNumber - b.startNumber;
+    });
 
   const topPicks = scored.slice(0, TOP_PICK_COUNT);
   const top = scored[0];
@@ -189,7 +198,7 @@ function loadLegSummary(db: Database.Database, sessionId: number): GameSessionLe
 
   const systemSuggestion = analyzeSystemLeg({
     terms,
-    entries: entries.map((e) => ({
+    entries: activeEntries.map((e) => ({
       startNumber: e.startNumber,
       horseName: e.horseName,
       trotScore: e.trotScore,
@@ -235,6 +244,8 @@ function loadLegSummary(db: Database.Database, sessionId: number): GameSessionLe
       startNumber: e.startNumber,
       horseName: e.horseName,
       trotScore: e.trotScore!,
+      isWatched: watchedHorseIds.has(e.atgHorseId),
+      scratched: e.scratched === 1,
     })),
     topStartNumber: top?.startNumber ?? null,
     topHorseName: top?.horseName ?? null,
