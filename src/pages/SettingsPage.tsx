@@ -8,7 +8,6 @@ import {
   fetchTrackProfile,
   fetchTrackProfiles,
   optimizeBacktest,
-  runAutoOptimizer,
   runBacktest,
   saveParameters,
   saveTrackProfile,
@@ -236,8 +235,21 @@ function BacktestPanel({
     setRunResult(null);
     setOptimizeResult(null);
     try {
-      const result = await optimizeBacktest({ ...filterBody, maxTrials });
-      setOptimizeResult(result);
+      const trackId = Number(atgTrackId);
+      let status = await optimizeBacktest({ ...filterBody, maxTrials });
+      setAutoStatus(status);
+
+      while (status.running) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+        status = await fetchAutoOptimizerStatus(trackId);
+        setAutoStatus(status);
+      }
+
+      if (status.lastResult) {
+        setOptimizeResult(status.lastResult);
+      } else if (status.phase === 'error') {
+        setError(status.message ?? 'Optimering misslyckades');
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Optimering misslyckades');
     } finally {
@@ -370,7 +382,7 @@ function BacktestPanel({
             const selected = OPTIMIZE_TRIAL_OPTIONS.find((o) => o.value === maxTrials);
             return selected ? (
               <p className="muted" style={{ marginTop: '-0.25rem' }}>
-                {selected.hint}. Optimeringen kör tills hela försöksbudgeten är förbrukad.
+                {selected.hint}. Optimeringen körs i bakgrunden — du kan fortsätta surfa medan den pågår.
               </p>
             ) : null;
           })()}
@@ -387,22 +399,11 @@ function BacktestPanel({
             <button
               type="button"
               onClick={handleOptimize}
-              disabled={running || optimizing || !canOptimize}
-            >
-              {optimizing
-                ? `Optimerar… (${maxTrials.toLocaleString('sv-SE')} försök)`
-                : 'Optimera manuellt'}
-            </button>
-            <button
-              type="button"
-              className="secondary"
-              onClick={() => {
-                if (atgTrackId === '') return;
-                runAutoOptimizer(goal, Number(atgTrackId), maxTrials).then(setAutoStatus);
-              }}
               disabled={running || optimizing || autoStatus?.running || !canOptimize}
             >
-              {autoStatus?.running ? 'Optimerar…' : `Optimera ${workingTrackName ?? 'banan'} i bakgrunden`}
+              {optimizing || autoStatus?.running
+                ? `Optimerar… (${maxTrials.toLocaleString('sv-SE')} försök)`
+                : 'Optimera vikter'}
             </button>
           </div>
 

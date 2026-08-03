@@ -46,6 +46,7 @@ const COARSE_STEP = 5;
 const FINE_STEP = 1;
 const RANDOM_RESTARTS = 8;
 const WEIGHT_SEARCH_RADIUS = 50;
+const OPTIMIZE_YIELD_EVERY = 25;
 const MIN_TOTAL_WEIGHT = 50;
 const MIN_ACTIVE_PARAMS = 3;
 const MIN_WEIGHT_FOR_ACTIVE = 5;
@@ -66,6 +67,16 @@ export interface OptimizeProgress {
 export interface OptimizeOptions {
   onProgress?: (progress: OptimizeProgress) => void;
   maxTrials?: number;
+}
+
+function yieldOptimize(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function maybeYieldOptimize(trialsRun: number): Promise<void> {
+  if (trialsRun > 0 && trialsRun % OPTIMIZE_YIELD_EVERY === 0) {
+    await yieldOptimize();
+  }
 }
 
 function cloneParameters(params: Parameter[]): Parameter[] {
@@ -153,7 +164,7 @@ interface OptimizeContext {
   atgTrackId: number;
 }
 
-function coordinateDescent(
+async function coordinateDescent(
   ctx: OptimizeContext,
   start: Parameter[],
   baselineById: Map<string, number>,
@@ -163,7 +174,7 @@ function coordinateDescent(
   options?: OptimizeOptions,
   phase: OptimizeProgress['phase'] = 'coarse',
   restartIndex = 0,
-): { best: ScoredBacktest; weights: Parameter[] } {
+): Promise<{ best: ScoredBacktest; weights: Parameter[] }> {
   let localBest = best;
   let localWeights = cloneParameters(start);
   let current = cloneParameters(start);
@@ -187,6 +198,7 @@ function coordinateDescent(
         if (!isValidWeightSet(trial)) continue;
 
         state.trialsRun++;
+        await maybeYieldOptimize(state.trialsRun);
         const result = runBacktestInternal(
           ctx.sessions,
           ctx.entryScoresBySession,
@@ -219,14 +231,14 @@ function coordinateDescent(
   return { best: localBest, weights: localWeights };
 }
 
-function fillRemainingTrials(
+async function fillRemainingTrials(
   ctx: OptimizeContext,
   baselineWeights: Parameter[],
   best: ScoredBacktest,
   bestWeights: Parameter[],
   state: { trialsRun: number; maxTrials: number },
   options?: OptimizeOptions,
-): { best: ScoredBacktest; weights: Parameter[] } {
+): Promise<{ best: ScoredBacktest; weights: Parameter[] }> {
   let localBest = best;
   let localWeights = cloneParameters(bestWeights);
 
@@ -235,6 +247,7 @@ function fillRemainingTrials(
     if (!seed) continue;
 
     state.trialsRun++;
+    await maybeYieldOptimize(state.trialsRun);
     const result = runBacktestInternal(
       ctx.sessions,
       ctx.entryScoresBySession,
@@ -500,13 +513,13 @@ export function runBacktest(
   return summary;
 }
 
-export function optimizeWeights(
+export async function optimizeWeights(
   db: Database.Database,
   baseParameters: Parameter[],
   filter: BacktestFilter,
   goal: BacktestGoal,
   options?: OptimizeOptions,
-): BacktestOptimizeResult {
+): Promise<BacktestOptimizeResult> {
   const baselineWeights = cloneParameters(baseParameters);
   const sessions = loadSessions(db, filter);
   const trackName = sessions[0]?.trackName ?? '';
@@ -556,12 +569,12 @@ export function optimizeWeights(
   let best = baselineFull;
   let bestWeights = cloneParameters(baselineWeights);
 
-  let pass = coordinateDescent(ctx, bestWeights, baselineById, COARSE_STEP, best, state, options, 'coarse');
+  let pass = await coordinateDescent(ctx, bestWeights, baselineById, COARSE_STEP, best, state, options, 'coarse');
   if (compareBacktests(pass.best, best) > 0) {
     best = pass.best;
     bestWeights = pass.weights;
   }
-  pass = coordinateDescent(ctx, pass.weights, baselineById, FINE_STEP, pass.best, state, options, 'fine');
+  pass = await coordinateDescent(ctx, pass.weights, baselineById, FINE_STEP, pass.best, state, options, 'fine');
   if (compareBacktests(pass.best, best) > 0) {
     best = pass.best;
     bestWeights = pass.weights;
@@ -580,7 +593,7 @@ export function optimizeWeights(
       ctx.atgTrackId,
     );
 
-    let restartPass = coordinateDescent(
+    let restartPass = await coordinateDescent(
       ctx,
       seed,
       baselineById,
@@ -591,7 +604,7 @@ export function optimizeWeights(
       'restart',
       restart + 1,
     );
-    restartPass = coordinateDescent(
+    restartPass = await coordinateDescent(
       ctx,
       restartPass.weights,
       baselineById,
@@ -610,7 +623,7 @@ export function optimizeWeights(
   }
 
   if (state.trialsRun < state.maxTrials) {
-    const filled = fillRemainingTrials(ctx, baselineWeights, best, bestWeights, state, options);
+    const filled = await fillRemainingTrials(ctx, baselineWeights, best, bestWeights, state, options);
     if (compareBacktests(filled.best, best) > 0) {
       best = filled.best;
       bestWeights = filled.weights;

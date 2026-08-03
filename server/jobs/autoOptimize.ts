@@ -243,7 +243,7 @@ async function runAutoOptimize(
   };
 
   try {
-    const result = optimizeWeights(
+    const result = await optimizeWeights(
       db,
       getTrackProfileOrGlobal(db, track.atgTrackId),
       { atgTrackId: track.atgTrackId },
@@ -306,13 +306,14 @@ export function scheduleAutoOptimize(
   goal: BacktestGoal = DEFAULT_BACKTEST_GOAL,
   atgTrackId?: number | null,
   maxTrials?: number,
+  options?: { allowLargeTrack?: boolean },
 ) {
   const { track, error } = resolveTrack(db, atgTrackId);
   if (!track) {
     if (error) console.log(`Auto-optimering hoppades över: ${error}`);
     return;
   }
-  if (track.racesWithResult > AUTO_OPT_MAX_RACES) {
+  if (!options?.allowLargeTrack && track.racesWithResult > AUTO_OPT_MAX_RACES) {
     console.log(
       `Auto-optimering hoppades över för ${track.trackName} (${track.racesWithResult} lopp — kör manuellt vid behov).`,
     );

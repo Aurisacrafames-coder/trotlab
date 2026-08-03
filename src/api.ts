@@ -1,7 +1,6 @@
 import type {
   AutoOptimizerStatus,
   BacktestGoal,
-  BacktestOptimizeResult,
   BacktestSummary,
   BacktestTrackOption,
   BulkImportStatus,
@@ -247,7 +246,7 @@ export const optimizeBacktest = (body: {
   goal: BacktestGoal;
   maxTrials?: number;
 }) =>
-  api<BacktestOptimizeResult>('/backtest/optimize', { method: 'POST', body: JSON.stringify(body) });
+  api<AutoOptimizerStatus>('/backtest/optimize', { method: 'POST', body: JSON.stringify(body) });
 
 export const fetchAutoOptimizerStatus = (atgTrackId?: number) =>
   api<AutoOptimizerStatus>(

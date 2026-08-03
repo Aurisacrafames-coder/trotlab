@@ -19,7 +19,7 @@ import {
 import { startStatsSyncJob } from './jobs/syncStats.js';
 import { getAutoOptimizerStatus, scheduleAutoOptimize, startAutoOptimizeJob } from './jobs/autoOptimize.js';
 import { startEarningsRefreshJob } from './jobs/refreshEarnings.js';
-import { listBacktestTracks, normalizeMaxTrials, optimizeWeights, runBacktest } from './backtest.js';
+import { listBacktestTracks, normalizeMaxTrials, runBacktest } from './backtest.js';
 import { refreshAllGameSessionRaceInfo } from './raceInfoRefresh.js';
 import { saveUserSystem, validateUserSystemLegs } from './userSystem.js';
 import {
@@ -884,14 +884,19 @@ app.post('/api/backtest/optimize', (req, res) => {
     return res.status(400).json({ error: 'goal måste vara win eller top3' });
   }
 
-  const result = optimizeWeights(
+  const status = getAutoOptimizerStatus(getDb(), atgTrackId);
+  if (status.running) {
+    return res.status(409).json({ error: 'Optimering pågår redan — vänta tills den är klar.' });
+  }
+
+  scheduleAutoOptimize(
     getDb(),
-    getTrackProfileOrGlobal(getDb(), atgTrackId),
-    { atgTrackId, startMethod: startMethod ?? undefined, gameType: gameType ?? undefined },
     goal,
-    { maxTrials: normalizeMaxTrials(maxTrials) },
+    atgTrackId,
+    normalizeMaxTrials(maxTrials),
+    { allowLargeTrack: true },
   );
-  res.json(result);
+  res.json(getAutoOptimizerStatus(getDb(), atgTrackId));
 });
 
 app.get('/api/backtest/auto', (req, res) => {
@@ -909,7 +914,9 @@ app.post('/api/backtest/auto/run', (req, res) => {
   const selectedGoal = goal === 'top3' ? 'top3' : DEFAULT_BACKTEST_GOAL;
   const trackId =
     typeof atgTrackId === 'number' && Number.isFinite(atgTrackId) ? atgTrackId : undefined;
-  scheduleAutoOptimize(getDb(), selectedGoal, trackId, normalizeMaxTrials(maxTrials));
+  scheduleAutoOptimize(getDb(), selectedGoal, trackId, normalizeMaxTrials(maxTrials), {
+    allowLargeTrack: true,
+  });
   res.json(getAutoOptimizerStatus(getDb(), trackId));
 });
 
