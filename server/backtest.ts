@@ -219,6 +219,48 @@ function coordinateDescent(
   return { best: localBest, weights: localWeights };
 }
 
+function fillRemainingTrials(
+  ctx: OptimizeContext,
+  baselineWeights: Parameter[],
+  best: ScoredBacktest,
+  bestWeights: Parameter[],
+  state: { trialsRun: number; maxTrials: number },
+  options?: OptimizeOptions,
+): { best: ScoredBacktest; weights: Parameter[] } {
+  let localBest = best;
+  let localWeights = cloneParameters(bestWeights);
+
+  while (state.trialsRun < state.maxTrials) {
+    const seed = randomValidWeights(baselineWeights);
+    if (!seed) continue;
+
+    state.trialsRun++;
+    const result = runBacktestInternal(
+      ctx.sessions,
+      ctx.entryScoresBySession,
+      seed,
+      ctx.goal,
+      ctx.trackName,
+      ctx.atgTrackId,
+    );
+
+    options?.onProgress?.({
+      trialsRun: state.trialsRun,
+      bestHits: localBest.hits,
+      racesWithResult: localBest.racesWithResult,
+      phase: 'restart',
+      restartIndex: 0,
+    });
+
+    if (compareBacktests(result, localBest) > 0) {
+      localBest = result;
+      localWeights = cloneParameters(seed);
+    }
+  }
+
+  return { best: localBest, weights: localWeights };
+}
+
 function loadSessions(db: Database.Database, filter: BacktestFilter): SessionRow[] {
   let sql = `
     SELECT id, date, game_type as gameType, leg_number as legNumber,
@@ -567,7 +609,16 @@ export function optimizeWeights(
     }
   }
 
+  if (state.trialsRun < state.maxTrials) {
+    const filled = fillRemainingTrials(ctx, baselineWeights, best, bestWeights, state, options);
+    if (compareBacktests(filled.best, best) > 0) {
+      best = filled.best;
+      bestWeights = filled.weights;
+    }
+  }
+
   const improved = compareBacktests(best, baselineFull) > 0;
+  const usedAllTrials = state.trialsRun >= state.maxTrials;
 
   return {
     goal,
@@ -582,8 +633,12 @@ export function optimizeWeights(
     hitsGained: (improved ? best : baselineFull).hits - baselineFull.hits,
     improved,
     message: improved
-      ? `Hittade bättre vikter efter ${state.trialsRun} testade alternativ (max ${state.maxTrials}).`
-      : `Ingen bättre viktuppsättning hittades efter ${state.trialsRun} testade alternativ (max ${state.maxTrials}) — behåll nuvarande inställningar.`,
+      ? usedAllTrials
+        ? `Hittade bättre vikter efter alla ${state.maxTrials.toLocaleString('sv-SE')} testade alternativ.`
+        : `Hittade bättre vikter efter ${state.trialsRun.toLocaleString('sv-SE')} testade alternativ (max ${state.maxTrials.toLocaleString('sv-SE')}).`
+      : usedAllTrials
+        ? `Ingen bättre viktuppsättning hittades efter alla ${state.maxTrials.toLocaleString('sv-SE')} testade alternativ — behåll nuvarande inställningar.`
+        : `Ingen bättre viktuppsättning hittades efter ${state.trialsRun.toLocaleString('sv-SE')} testade alternativ (max ${state.maxTrials.toLocaleString('sv-SE')}) — behåll nuvarande inställningar.`,
     trialsRun: state.trialsRun,
     maxTrials: state.maxTrials,
   };

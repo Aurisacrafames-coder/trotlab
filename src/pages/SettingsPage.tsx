@@ -370,7 +370,7 @@ function BacktestPanel({
             const selected = OPTIMIZE_TRIAL_OPTIONS.find((o) => o.value === maxTrials);
             return selected ? (
               <p className="muted" style={{ marginTop: '-0.25rem' }}>
-                {selected.hint}. Fler försök ökar chansen att hitta bättre vikter men tar längre tid.
+                {selected.hint}. Optimeringen kör tills hela försöksbudgeten är förbrukad.
               </p>
             ) : null;
           })()}

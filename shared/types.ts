@@ -250,13 +250,14 @@ export interface BacktestOptimizeResult {
 }
 
 /** Default number of weight combinations to try during optimization. */
-export const OPTIMIZE_TRIALS_DEFAULT = 5000;
+export const OPTIMIZE_TRIALS_DEFAULT = 50_000;
 
 export const OPTIMIZE_TRIAL_OPTIONS = [
-  { value: 5000, label: 'Standard — 5 000 försök', hint: 'Snabbast, ca 1–3 min' },
-  { value: 10000, label: 'Utökad — 10 000 försök', hint: 'Ca 2–6 min' },
-  { value: 25000, label: 'Grundlig — 25 000 försök', hint: 'Ca 5–15 min' },
-  { value: 50000, label: 'Djup — 50 000 försök', hint: 'Kan ta 15–30+ min' },
+  { value: 50_000, label: 'Djup — 50 000 försök (standard)', hint: 'Använder hela budgeten — tar längst tid men ger stabilast resultat' },
+  { value: 25_000, label: 'Grundlig — 25 000 försök', hint: 'Använder hela budgeten, ca 5–20 min' },
+  { value: 10_000, label: 'Utökad — 10 000 försök', hint: 'Använder hela budgeten, ca 2–8 min' },
+  { value: 5_000, label: 'Snabb — 5 000 försök', hint: 'Använder hela budgeten, ca 1–3 min' },
+  { value: 100_000, label: 'Maximal — 100 000 försök', hint: 'Största banor kan ta över en timme' },
 ] as const;
 
 export interface AutoOptimizerStatus {
