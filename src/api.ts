@@ -187,8 +187,17 @@ export const saveEntryTrainerWinPct = (
     method: 'PATCH',
     body: JSON.stringify({ winPct }),
   });
-export const importRace = (url: string) =>
-  api<RaceSession>('/import', { method: 'POST', body: JSON.stringify({ url }) });
+export interface ImportGameResult {
+  gameSession: GameSession;
+  importedLegs: number;
+  totalLegs: number;
+  errors: string[];
+}
+
+export const importRace = (url: string, allLegs = false) =>
+  allLegs
+    ? api<ImportGameResult>('/import', { method: 'POST', body: JSON.stringify({ url, allLegs: true }) })
+    : api<RaceSession>('/import', { method: 'POST', body: JSON.stringify({ url }) });
 export const fetchResultsFromAtg = (id: number, url?: string) =>
   api<RaceSession>(`/sessions/${id}/fetch-results`, {
     method: 'POST',

@@ -37,6 +37,7 @@ import {
 import { formatStartMethodLabel } from '../../shared/scoring';
 
 import { MIN_SPIKE_MARGIN, MIN_SPIKE_TOP_SCORE } from '../../shared/spikeSuggestions';
+import RankingExportPanel from '../components/RankingExportPanel';
 
 
 
@@ -451,6 +452,18 @@ export default function GamePage() {
               </span>
 
             )}
+
+            {game.legs.length > 0 && <RankingExportPanel game={game} />}
+
+          </div>
+
+        )}
+
+        {!game.systemPlan && game.legs.length > 0 && (
+
+          <div className="import-row" style={{ marginTop: '0.75rem' }}>
+
+            <RankingExportPanel game={game} />
 
           </div>
 

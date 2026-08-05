@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   fetchBulkImportStatus,
@@ -6,11 +6,19 @@ import {
   importRace,
   startBulkImport,
 } from '../api';
-import type { BulkImportStatus, KnownTrack } from '../../shared/types';
+import type { BulkImportStatus, KnownTrack, RaceSession } from '../../shared/types';
 import { BULK_IMPORT_LOOKBACK_MONTHS } from '../../shared/types';
+import type { ImportGameResult } from '../api';
+
+function isGameDivisionUrl(url: string): boolean {
+  const trimmed = url.trim();
+  if (!trimmed || /\/vinnare\//i.test(trimmed)) return false;
+  return /\/avd\/\d+/i.test(trimmed) || /\/spel\/[^/]+\/\d{4}-\d{2}-\d{2}\/[^/]+\/avd\//i.test(trimmed);
+}
 
 export default function ImportPage() {
   const [url, setUrl] = useState('');
+  const [importAllLegs, setImportAllLegs] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tracks, setTracks] = useState<KnownTrack[]>([]);
@@ -46,13 +54,26 @@ export default function ImportPage() {
   }, []);
 
   const selectedBulkTrack = tracks.find((t) => t.atgTrackId === bulkTrackId);
+  const gameDivisionUrl = useMemo(() => isGameDivisionUrl(url), [url]);
 
   async function handleImport() {
     if (!url.trim()) return;
     setLoading(true);
     setError(null);
     try {
-      const session = await importRace(url.trim());
+      const importAll = gameDivisionUrl && importAllLegs;
+      if (importAll) {
+        const result = await importRace(url.trim(), true) as ImportGameResult;
+        if (result.errors.length > 0) {
+          setError(
+            `Importerade ${result.importedLegs}/${result.totalLegs} avdelningar. ${result.errors.slice(0, 3).join(' · ')}`,
+          );
+        }
+        navigate(`/omgang/${result.gameSession.id}`);
+        return;
+      }
+
+      const session = await importRace(url.trim(), false) as RaceSession;
       if (session.gameSessionId) {
         navigate(`/omgang/${session.gameSessionId}`);
       } else {
@@ -164,8 +185,19 @@ export default function ImportPage() {
           Klistra in en länk till en avdelning (V86, V85, GS75, V64 …) eller ett enstaka lopp
           (vinnarspelet), t.ex.{' '}
           <code>/spel/2026-07-27/vinnare/ostersund/lopp/2</code>.
-          Första importen kan ta några sekunder.
+          För spelomgångar kan du importera alla avdelningar på en gång.
         </p>
+        {gameDivisionUrl && (
+          <label className="import-all-legs" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
+            <input
+              type="checkbox"
+              checked={importAllLegs}
+              onChange={(e) => setImportAllLegs(e.target.checked)}
+              disabled={loading}
+            />
+            <span>Importera alla avdelningar i omgången</span>
+          </label>
+        )}
         <div className="import-row">
           <input
             type="url"
@@ -176,7 +208,13 @@ export default function ImportPage() {
             disabled={loading}
           />
           <button onClick={handleImport} disabled={loading || !url.trim()}>
-            {loading ? 'Hämtar…' : 'Importera'}
+            {loading
+              ? gameDivisionUrl && importAllLegs
+                ? 'Hämtar alla avdelningar…'
+                : 'Hämtar…'
+              : gameDivisionUrl && importAllLegs
+                ? 'Importera hela omgången'
+                : 'Importera'}
           </button>
         </div>
         {error && <p className="error">{error}</p>}

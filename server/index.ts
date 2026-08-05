@@ -53,7 +53,7 @@ import {
   searchStatEntities,
 } from './statsVerification.js';
 import { accessGate } from './auth.js';
-import { persistImportedRace } from './importService.js';
+import { importAllGameLegsFromUrl, persistImportedRace } from './importService.js';
 import { startTrainerBackfillJob } from './trainerRefresh.js';
 import type { BacktestGoal, Parameter, RaceEntry, RaceSession } from '../shared/types.js';
 import { DEFAULT_BACKTEST_GOAL } from '../shared/types.js';
@@ -230,11 +230,26 @@ app.put('/api/parameters', (req, res) => {
 
 app.post('/api/import', async (req, res) => {
   try {
-    const { url } = req.body as { url: string };
+    const { url, allLegs } = req.body as { url: string; allLegs?: boolean };
     if (!url?.trim()) return res.status(400).json({ error: 'URL saknas' });
 
-    const sessionId = await persistImportedRace(getDb(), url.trim());
-    scheduleAutoOptimize(getDb());
+    const db = getDb();
+    if (allLegs) {
+      const result = await importAllGameLegsFromUrl(db, url.trim());
+      scheduleAutoOptimize(db);
+      const game = loadGameSession(db, result.gameSessionId);
+      if (!game) return res.status(500).json({ error: 'Omgången kunde inte laddas efter import' });
+      res.json({
+        gameSession: game,
+        importedLegs: result.imported,
+        totalLegs: result.total,
+        errors: result.errors,
+      });
+      return;
+    }
+
+    const sessionId = await persistImportedRace(db, url.trim());
+    scheduleAutoOptimize(db);
     res.json(await loadSession(sessionId));
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Import misslyckades';

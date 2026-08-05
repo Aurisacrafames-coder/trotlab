@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { deleteGameSession, fetchGameSessions, fetchStatsSync, syncTrackStats, type GameSessionListItem } from '../api';
+import { deleteGameSession, fetchGameSession, fetchGameSessions, fetchStatsSync, syncTrackStats, type GameSessionListItem } from '../api';
+import { downloadRankingHtml } from '../../shared/rankingExport';
 
 export default function HomePage() {
   const [games, setGames] = useState<GameSessionListItem[]>([]);
   const [syncStatus, setSyncStatus] = useState<{ lastSyncAt: string | null; running: boolean } | null>(null);
   const [loading, setLoading] = useState(true);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [exportingId, setExportingId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
 
@@ -25,6 +27,19 @@ export default function HomePage() {
       })
       .finally(() => setLoading(false));
   }, []);
+
+  async function handleExportRanking(game: GameSessionListItem) {
+    setExportingId(game.id);
+    setError(null);
+    try {
+      const full = await fetchGameSession(game.id);
+      downloadRankingHtml(full);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Kunde inte exportera ranking');
+    } finally {
+      setExportingId(null);
+    }
+  }
 
   async function handleDelete(game: GameSessionListItem) {
     const label = `${game.gameType} ${game.trackName} ${game.date} (${game.legCount} avd)`;
@@ -108,6 +123,15 @@ export default function HomePage() {
                     : '—'}
                 </span>
               </Link>
+              <button
+                type="button"
+                className="secondary session-delete-btn"
+                disabled={exportingId === g.id}
+                onClick={() => handleExportRanking(g)}
+                title="Ladda ner ranking"
+              >
+                {exportingId === g.id ? '…' : 'Ranking'}
+              </button>
               <button
                 type="button"
                 className="secondary session-delete-btn"

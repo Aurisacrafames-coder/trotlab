@@ -1274,6 +1274,40 @@ tr:hover td {
   color: var(--muted);
 }
 
+.ranking-export {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.ranking-export-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.85rem;
+}
+
+.ranking-export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.ranking-export-hint {
+  margin: 0 0 0.75rem;
+  font-size: 0.88rem;
+}
+
+.ranking-export-preview {
+  width: 100%;
+  min-height: 420px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+}
+
 @media (max-width: 640px) {
   .stat-driver-overview {
     grid-template-columns: 1fr;

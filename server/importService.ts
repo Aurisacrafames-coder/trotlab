@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { atgFetch, importFromUrl } from './atg.js';
+import { atgFetch, importFromUrl, parseAtgUrl, resolveRaceId, TRACK_SLUGS } from './atg.js';
 import { ensureGlobalTrainerCache, ensureTrackPostStatsForTrack, getDriverGlobalWinPercentCached, getDriverTrackWinPercentCached, getTrainerWinPercentCached, getTrackPostWinPercentCached, prefetchImportStats } from './atgStats.js';
 import { findOrCreateGameSession, linkRaceToGameSession } from './gameSessions.js';
 import { recalculateSessionScores } from './sessionScores.js';
@@ -121,6 +121,86 @@ export function dateMonthsAgo(months: number): string {
   const d = new Date();
   d.setMonth(d.getMonth() - months);
   return d.toISOString().slice(0, 10);
+}
+
+export function isGameDivisionUrl(url: string): boolean {
+  const parsed = parseAtgUrl(url);
+  return parsed != null && parsed.gameType !== 'VINNARE' && parsed.gameType !== 'UNKNOWN';
+}
+
+export async function discoverGameLegsFromUrl(sourceUrl: string): Promise<LegImportTarget[]> {
+  const parsed = parseAtgUrl(sourceUrl.trim());
+  if (!parsed || parsed.gameType === 'VINNARE' || parsed.gameType === 'UNKNOWN') {
+    throw new Error('Länken måste vara till en avdelning i V86, V85, GS75, V64 …');
+  }
+
+  const calendar = await atgFetch<{
+    games?: Record<string, Array<{ id: string; races: string[] }>>;
+  }>(`/calendar/day/${parsed.date}`);
+
+  const gameType = parsed.gameType;
+  const games =
+    calendar.games?.[gameType] ??
+    calendar.games?.[gameType.toLowerCase()] ??
+    calendar.games?.[gameType.toUpperCase()] ??
+    [];
+
+  const trackId = TRACK_SLUGS[parsed.trackSlug.toLowerCase()];
+  let game = trackId != null ? games.find((g) => g.id.includes(`_${trackId}_`)) : undefined;
+
+  if (!game) {
+    const raceId = await resolveRaceId(parsed);
+    game = games.find((g) => g.races.includes(raceId));
+  }
+
+  if (!game?.races.length) {
+    throw new Error(
+      `Kunde inte hitta ${gameType} på ${parsed.date} (${parsed.trackSlug}). Kontrollera länken.`,
+    );
+  }
+
+  return game.races.map((raceId, index) => ({
+    url: `https://www.atg.se/spel/${parsed.date}/${gameType}/${parsed.trackSlug}/avd/${index + 1}`,
+    date: parsed.date,
+    gameType,
+    leg: index + 1,
+    raceId,
+  }));
+}
+
+export async function importAllGameLegsFromUrl(
+  db: Database.Database,
+  sourceUrl: string,
+): Promise<{ gameSessionId: number; imported: number; total: number; errors: string[] }> {
+  const targets = await discoverGameLegsFromUrl(sourceUrl);
+  let gameSessionId: number | null = null;
+  let imported = 0;
+  const errors: string[] = [];
+
+  for (const target of targets) {
+    try {
+      const sessionId = await persistImportedRace(db, target.url);
+      imported++;
+      const row = db
+        .prepare('SELECT game_session_id AS id FROM race_sessions WHERE id = ?')
+        .get(sessionId) as { id: number | null } | undefined;
+      if (row?.id) gameSessionId = row.id;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push(`Avd ${target.leg}: ${message}`);
+    }
+    await sleep(250);
+  }
+
+  if (gameSessionId == null) {
+    throw new Error(
+      errors.length > 0
+        ? errors.join('; ')
+        : 'Importen misslyckades — inga avdelningar kunde importeras.',
+    );
+  }
+
+  return { gameSessionId, imported, total: targets.length, errors };
 }
 
 export async function persistImportedRace(
