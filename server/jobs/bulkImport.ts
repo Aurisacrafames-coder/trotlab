@@ -3,6 +3,8 @@ import {
   bulkImportTrackLegs,
   dateMonthsAgo,
   discoverTrackLegsForRange,
+  loadImportedRaceIds,
+  resolveDiscoveryFromDate,
 } from '../importService.js';
 import { scheduleAutoOptimize } from './autoOptimize.js';
 import { getTrackStats } from '../trackStats.js';
@@ -78,12 +80,32 @@ async function runBulkImport(
   saveStatus(db, liveStatus);
 
   try {
+    const alreadyImported = loadImportedRaceIds(db, options.atgTrackId, fromDate, toDate);
+    const discoveryFromDate = resolveDiscoveryFromDate(
+      db,
+      options.atgTrackId,
+      fromDate,
+      alreadyImported,
+    );
+
+    liveStatus = {
+      ...liveStatus,
+      message:
+        alreadyImported.size > 0
+          ? discoveryFromDate > fromDate
+            ? `Söker nya lopp på ${options.trackName} sedan ${discoveryFromDate} (${alreadyImported.size} redan importerade)…`
+            : `Söker nya lopp på ${options.trackName} (${alreadyImported.size} redan importerade)…`
+          : `Söker avslutade lopp på ${options.trackName}…`,
+    };
+    saveStatus(db, liveStatus);
+
     const targets = await discoverTrackLegsForRange({
       trackId: options.atgTrackId,
       trackSlug: options.trackSlug,
-      fromDate,
+      fromDate: discoveryFromDate,
       toDate,
       onlyWithResults: true,
+      skipRaceIds: alreadyImported,
     });
 
     liveStatus = {
@@ -91,8 +113,10 @@ async function runBulkImport(
       total: targets.length,
       message:
         targets.length === 0
-          ? `Inga avslutade lopp hittades på ${options.trackName} sedan ${fromDate}.`
-          : `Importerar ${targets.length} avdelningar…`,
+          ? alreadyImported.size > 0
+            ? `Inga nya lopp att importera — ${alreadyImported.size} avdelningar fanns redan sedan ${fromDate}.`
+            : `Inga avslutade lopp hittades på ${options.trackName} sedan ${fromDate}.`
+          : `Importerar ${targets.length} nya avdelningar…`,
     };
     saveStatus(db, liveStatus);
 

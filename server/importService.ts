@@ -28,6 +28,63 @@ function* dateRange(from: string, to: string): Generator<string> {
   }
 }
 
+function loadRaceStatusFromCalendar(
+  calendar: { tracks?: Array<{ id: number; races?: Array<{ id: string; status?: string }> }> },
+  trackId: number,
+): Map<string, string | undefined> {
+  const map = new Map<string, string | undefined>();
+  const track = calendar.tracks?.find((t) => t.id === trackId);
+  for (const race of track?.races ?? []) {
+    map.set(race.id, race.status);
+  }
+  return map;
+}
+
+export function loadImportedRaceIds(
+  db: Database.Database,
+  trackId: number,
+  fromDate: string,
+  toDate: string,
+): Set<string> {
+  const rows = db
+    .prepare(
+      `SELECT atg_race_id AS id FROM race_sessions
+       WHERE atg_track_id = ? AND date >= ? AND date <= ?`,
+    )
+    .all(trackId, fromDate, toDate) as Array<{ id: string }>;
+  return new Set(rows.map((row) => row.id));
+}
+
+/** When history is already loaded, only scan recent dates for new races. */
+export function resolveDiscoveryFromDate(
+  db: Database.Database,
+  trackId: number,
+  fromDate: string,
+  alreadyImported: Set<string>,
+): string {
+  if (alreadyImported.size === 0) return fromDate;
+
+  const row = db
+    .prepare(
+      `SELECT MIN(date) AS minDate FROM race_sessions
+       WHERE atg_track_id = ? AND date >= ? AND status = 'results'`,
+    )
+    .get(trackId, fromDate) as { minDate: string | null } | undefined;
+
+  if (!row?.minDate) return fromDate;
+
+  const minImported = new Date(`${row.minDate}T12:00:00`);
+  const rangeStart = new Date(`${fromDate}T12:00:00`);
+  const daysFromStart = (minImported.getTime() - rangeStart.getTime()) / 86_400_000;
+
+  if (daysFromStart <= 45) {
+    const recentFrom = dateMonthsAgo(1);
+    return recentFrom > fromDate ? recentFrom : fromDate;
+  }
+
+  return fromDate;
+}
+
 export async function discoverTrackLegsForRange(options: {
   trackId: number;
   trackSlug: string;
@@ -35,6 +92,7 @@ export async function discoverTrackLegsForRange(options: {
   toDate?: string;
   gameTypes?: string[];
   onlyWithResults?: boolean;
+  skipRaceIds?: Set<string>;
 }): Promise<LegImportTarget[]> {
   const {
     trackId,
@@ -43,6 +101,7 @@ export async function discoverTrackLegsForRange(options: {
     toDate,
     gameTypes = DEFAULT_GAME_TYPES,
     onlyWithResults = true,
+    skipRaceIds,
   } = options;
 
   const today = new Date().toISOString().slice(0, 10);
@@ -60,6 +119,8 @@ export async function discoverTrackLegsForRange(options: {
       continue;
     }
 
+    const raceStatusById = loadRaceStatusFromCalendar(calendar, trackId);
+
     for (const gameType of gameTypes) {
       const games = calendar.games?.[gameType] ?? calendar.games?.[gameType.toUpperCase()] ?? [];
       for (const game of games) {
@@ -68,15 +129,20 @@ export async function discoverTrackLegsForRange(options: {
         for (let leg = 1; leg <= game.races.length; leg++) {
           const raceId = game.races[leg - 1];
           if (!raceId || seenRaceIds.has(raceId)) continue;
+          if (skipRaceIds?.has(raceId)) continue;
 
           if (onlyWithResults) {
-            try {
-              const race = await atgFetch<{ status: string }>(`/races/${raceId}`);
-              if (race.status !== 'results') continue;
-            } catch {
-              continue;
+            let status = raceStatusById.get(raceId);
+            if (status == null) {
+              try {
+                const race = await atgFetch<{ status: string }>(`/races/${raceId}`);
+                status = race.status;
+              } catch {
+                continue;
+              }
+              await sleep(15);
             }
-            await sleep(15);
+            if (status !== 'results') continue;
           }
 
           seenRaceIds.add(raceId);
@@ -363,13 +429,13 @@ export async function bulkImportTrackLegs(
       await persistImportedRace(db, target.url);
       imported++;
       onProgress?.(i + 1, targets.length, target);
+      await sleep(250);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       errors.push(`${target.date} ${target.gameType} avd ${target.leg}: ${message}`);
       onProgress?.(i + 1, targets.length, target, message);
+      await sleep(250);
     }
-
-    await sleep(250);
   }
 
   return { imported, skipped, errors };

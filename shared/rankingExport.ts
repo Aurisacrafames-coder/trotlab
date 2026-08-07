@@ -27,12 +27,11 @@ function formatLegPlain(game: GameSession, leg: GameSessionLeg, maxHorses = Infi
   if (leg.raceInfo?.name) lines.push(leg.raceInfo.name);
 
   const horses = leg.rankedHorses.slice(0, maxHorses);
-  horses.forEach((horse, index) => {
-    const rank = index + 1;
+  horses.forEach((horse) => {
     const watch = horse.isWatched ? ' ★' : '';
     const scratch = horse.scratched ? ' (struken)' : '';
     lines.push(
-      `  ${rank}. #${horse.startNumber} ${horse.horseName}${watch}${scratch} — ${horse.trotScore.toFixed(1)}`,
+      `  #${horse.startNumber} ${horse.horseName}${watch}${scratch} — ${horse.trotScore.toFixed(1)}`,
     );
   });
 
@@ -67,15 +66,13 @@ function legTableHtml(game: GameSession, leg: GameSessionLeg): string {
   const spike = game.suggestedSpikes.find((s) => s.legId === leg.id);
   const rows = leg.rankedHorses
     .map((horse, index) => {
-      const rank = index + 1;
       const rowClass = [
-        rank === 1 && !horse.scratched ? 'rank-top' : '',
+        index === 0 && !horse.scratched ? 'rank-top' : '',
         horse.scratched ? 'rank-scratched' : '',
       ]
         .filter(Boolean)
         .join(' ');
       return `<tr class="${rowClass}">
-        <td class="col-rank">${rank}</td>
         <td class="col-num">#${horse.startNumber}</td>
         <td class="col-horse">${escapeHtml(horse.horseName)}${horse.isWatched ? ' <span class="watch">★</span>' : ''}${horse.scratched ? ' <span class="muted">struken</span>' : ''}</td>
         <td class="col-score">${horse.trotScore.toFixed(1)}</td>
@@ -101,8 +98,7 @@ function legTableHtml(game: GameSession, leg: GameSessionLeg): string {
     <table>
       <thead>
         <tr>
-          <th>#</th>
-          <th>Start</th>
+          <th>Nr</th>
           <th>Häst</th>
           <th>Score</th>
         </tr>
@@ -211,7 +207,6 @@ export function buildRankingHtmlDocument(game: GameSession): string {
       background: #f8fafc;
     }
     tr:last-child td { border-bottom: none; }
-    .col-rank { width: 2.5rem; color: var(--muted); font-variant-numeric: tabular-nums; }
     .col-num { width: 4rem; font-weight: 600; font-variant-numeric: tabular-nums; }
     .col-score { width: 4.5rem; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
     .rank-top { background: var(--top-bg); }
