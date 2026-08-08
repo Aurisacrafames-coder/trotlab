@@ -358,6 +358,7 @@ export interface GameSessionListItem {
   gameType: string;
   date: string;
   trackName: string;
+  atgTrackId: number | null;
   legCount: number;
   tipSubmittedAt: string | null;
   hitsWin: number;
@@ -386,6 +387,7 @@ export function listGameSessions(db: Database.Database): GameSessionListItem[] {
       gameType: g.gameType,
       date: g.date,
       trackName: g.trackName,
+      atgTrackId: full.atgTrackId,
       legCount: full.legCount,
       tipSubmittedAt: g.tipSubmittedAt,
       hitsWin: full.hitsWin,

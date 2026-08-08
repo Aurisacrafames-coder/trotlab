@@ -24,6 +24,7 @@ import type {
   TrackProfileSummary,
 } from '../../shared/types';
 import { DEFAULT_PARAMETERS, mergeTrackParameterWeights, OPTIMIZE_TRIAL_OPTIONS, OPTIMIZE_TRIALS_DEFAULT, DEFAULT_BACKTEST_GOAL } from '../../shared/types';
+import SessionTrackBacktest from '../components/SessionTrackBacktest';
 
 function hitLabel(hit: 'win' | 'top3' | 'miss', winnerRank?: number | null) {
   const className = hit === 'win' ? 'hit-win' : hit === 'top3' ? 'hit-top3' : 'hit-miss';
@@ -590,6 +591,12 @@ function BacktestResultCard({
 
 export default function SettingsPage() {
   const [searchParams] = useSearchParams();
+  const initialSessionId = (() => {
+    const raw = searchParams.get('omgang') ?? searchParams.get('session');
+    if (!raw) return null;
+    const id = Number(raw);
+    return Number.isFinite(id) ? id : null;
+  })();
   const [params, setParams] = useState<Parameter[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -899,7 +906,7 @@ export default function SettingsPage() {
       </div>
 
       <div className="card">
-        <h2>2. Testa &amp; optimera</h2>
+        <h2>2. Testa &amp; optimera banprofil</h2>
         <BacktestPanel
           params={params}
           profileMode={profileMode}
@@ -909,6 +916,18 @@ export default function SettingsPage() {
           onSelectProfileTrack={(atgTrackId) => setProfileMode(atgTrackId)}
         />
       </div>
+
+      {profileMode !== 'global' && activeTrack && (
+        <div className="card">
+          <h2>3. Testa vikter från omgång mot all historik</h2>
+          <SessionTrackBacktest
+            atgTrackId={activeTrack.atgTrackId}
+            trackName={activeTrack.name}
+            initialSessionId={initialSessionId}
+            onApplyWeights={applySuggestedWeights}
+          />
+        </div>
+      )}
 
       <p className="muted">
         <Link to="/">← Tillbaka till lopp</Link>

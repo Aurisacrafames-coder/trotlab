@@ -29,6 +29,7 @@ export interface GameSessionListItem {
   gameType: string;
   date: string;
   trackName: string;
+  atgTrackId: number | null;
   legCount: number;
   tipSubmittedAt: string | null;
   hitsWin: number;
