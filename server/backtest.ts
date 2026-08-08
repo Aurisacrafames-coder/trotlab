@@ -9,7 +9,7 @@ import type {
   Parameter,
 } from '../shared/types.js';
 import { OPTIMIZE_TRIALS_DEFAULT, VARMNING_PARAMETER_ID } from '../shared/types.js';
-import { listTrackStats } from './trackStats.js';
+import { listTrackStats, resolveTrackName } from './trackStats.js';
 
 export type { BacktestGoal, BacktestOptimizeResult, BacktestRaceDetail, BacktestSummary, BacktestTrackOption };
 
@@ -511,7 +511,8 @@ export function runBacktest(
     };
   }
 
-  const trackName = sessions[0].trackName;
+  const trackName =
+    resolveTrackName(db, filter.atgTrackId) ?? sessions[0].trackName;
   const entryScoresBySession = loadEntryScores(
     db,
     sessions.map((s) => s.id),
@@ -536,7 +537,8 @@ export async function optimizeWeights(
 ): Promise<BacktestOptimizeResult> {
   const baselineWeights = cloneParameters(baseParameters);
   const sessions = loadSessions(db, filter);
-  const trackName = sessions[0]?.trackName ?? '';
+  const trackName =
+    resolveTrackName(db, filter.atgTrackId) ?? sessions[0]?.trackName ?? '';
   const entryScoresBySession = loadEntryScores(
     db,
     sessions.map((s) => s.id),

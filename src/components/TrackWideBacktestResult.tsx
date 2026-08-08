@@ -36,11 +36,13 @@ export function TrackWideResultPanel({
   goal,
   baseline,
   session,
+  sessionWeightsLabel = 'Omgångens vikter',
 }: {
   trackName: string;
   goal: BacktestGoal;
   baseline: BacktestSummary | null;
   session: BacktestSummary;
+  sessionWeightsLabel?: string;
 }) {
   const goalText = goalLabel(goal);
   const improved = baseline != null && session.hits > baseline.hits;
@@ -50,7 +52,7 @@ export function TrackWideResultPanel({
     <div className={`track-wide-result-banner${improved ? ' track-wide-result-improved' : ''}`}>
       <p className="track-wide-result-kicker">Hela banan — historik</p>
       <strong className="track-wide-result-title">
-        Omgångens vikter: {session.hits}/{session.racesWithResult} {goalText}
+        {sessionWeightsLabel}: {session.hits}/{session.racesWithResult} {goalText}
         {session.hitRate != null ? ` (${session.hitRate}%)` : ''}
       </strong>
       <p className="muted track-wide-result-explainer">
@@ -72,8 +74,8 @@ export function TrackWideResultPanel({
             />
             <div className="backtest-compare-arrow">→</div>
             <CompareBox
-              label="Omgångens vikter"
-              subtitle="Optimerade för vald omgång"
+              label={sessionWeightsLabel}
+              subtitle={baseline ? 'Optimerade för denna omgång' : undefined}
               hits={session.hits}
               total={session.racesWithResult}
               hitRate={session.hitRate}

@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { BacktestTrackOption } from '../shared/types.js';
+import { knownTrackNameById } from './atg.js';
 
 let cache: { at: number; data: BacktestTrackOption[] } | null = null;
 const CACHE_MS = 30_000;
@@ -25,6 +26,8 @@ export function getTrackStats(
 }
 
 export function resolveTrackName(db: Database.Database, atgTrackId: number): string | null {
+  const known = knownTrackNameById(atgTrackId);
+  if (known) return known;
   const cached = getTrackStats(db, atgTrackId);
   if (cached) return cached.trackName;
   const row = db
@@ -61,7 +64,7 @@ function queryTrackStats(db: Database.Database): BacktestTrackOption[] {
 
   return rows.map((r) => ({
     atgTrackId: r.atgTrackId,
-    trackName: r.trackName,
+    trackName: knownTrackNameById(r.atgTrackId) ?? r.trackName,
     raceCount: r.raceCount,
     racesWithResult: r.racesWithResult,
   }));

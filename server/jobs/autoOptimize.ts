@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import { listBacktestTracks, normalizeMaxTrials, optimizeWeights } from '../backtest.js';
 import { getTrackProfileOrGlobal } from '../trackWeightProfiles.js';
-import { getTrackStats } from '../trackStats.js';
+import { getTrackStats, resolveTrackName } from '../trackStats.js';
 import type { BacktestGoal, BacktestOptimizeResult } from '../../shared/types.js';
 import { DEFAULT_BACKTEST_GOAL } from '../../shared/types.js';
 
@@ -95,32 +95,48 @@ function resolveTrack(db: Database.Database, atgTrackId?: number | null) {
   return { track: primary, error: null };
 }
 
-function loadLegacyResult(db: Database.Database): BacktestOptimizeResult | null {
-  const raw = getMeta(db, META_RESULT);
-  if (!raw) return null;
+function parseStoredResult(
+  raw: string,
+  expectedTrackId?: number | null,
+): BacktestOptimizeResult | null {
   try {
-    return JSON.parse(raw) as BacktestOptimizeResult;
+    const result = JSON.parse(raw) as BacktestOptimizeResult;
+    if (expectedTrackId != null && result.atgTrackId !== expectedTrackId) return null;
+    return result;
   } catch {
     return null;
   }
+}
+
+function normalizeStoredResult(
+  db: Database.Database,
+  result: BacktestOptimizeResult,
+): BacktestOptimizeResult {
+  const trackName = resolveTrackName(db, result.atgTrackId) ?? result.trackName;
+  return trackName === result.trackName ? result : { ...result, trackName };
+}
+
+function loadLegacyResult(db: Database.Database): BacktestOptimizeResult | null {
+  const raw = getMeta(db, META_RESULT);
+  if (!raw) return null;
+  const result = parseStoredResult(raw);
+  return result ? normalizeStoredResult(db, result) : null;
 }
 
 function loadStoredResult(db: Database.Database, atgTrackId?: number | null): BacktestOptimizeResult | null {
   if (atgTrackId != null) {
     const perTrack = getMeta(db, resultMetaKey(atgTrackId));
     if (perTrack) {
-      try {
-        return JSON.parse(perTrack) as BacktestOptimizeResult;
-      } catch {
-        return null;
-      }
+      const result = parseStoredResult(perTrack, atgTrackId);
+      return result ? normalizeStoredResult(db, result) : null;
     }
     const legacy = loadLegacyResult(db);
     if (legacy?.atgTrackId === atgTrackId) return legacy;
     return null;
   }
 
-  return loadLegacyResult(db);
+  const legacy = loadLegacyResult(db);
+  return legacy;
 }
 
 function idleStatus(
@@ -167,6 +183,7 @@ export function getAutoOptimizerStatus(
   if (filterTrackId != null) {
     const stored = loadStoredResult(db, filterTrackId);
     const track = getTrackStats(db, filterTrackId);
+    const trackName = resolveTrackName(db, filterTrackId) ?? track?.trackName ?? null;
     if (stored) {
       return idleStatus(db, {
         atgTrackId: stored.atgTrackId,
@@ -182,9 +199,9 @@ export function getAutoOptimizerStatus(
     }
     return idleStatus(db, {
       atgTrackId: filterTrackId,
-      trackName: track?.trackName ?? null,
-      message: track
-        ? `Ingen optimering sparad för ${track.trackName} ännu.`
+      trackName,
+      message: trackName
+        ? `Ingen optimering sparad för ${trackName} ännu.`
         : 'Ingen optimering sparad för denna bana ännu.',
     });
   }

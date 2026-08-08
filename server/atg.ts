@@ -83,6 +83,12 @@ export function getTrackSlugById(atgTrackId: number): string | null {
   return null;
 }
 
+export function knownTrackNameById(atgTrackId: number): string | null {
+  const slug = getTrackSlugById(atgTrackId);
+  if (!slug) return null;
+  return TRACK_DISPLAY_NAMES[slug] ?? slug;
+}
+
 export function parseAtgUrl(url: string): (ParsedAtgUrl & { raceId?: string }) | null {
   try {
     const u = new URL(url.trim());

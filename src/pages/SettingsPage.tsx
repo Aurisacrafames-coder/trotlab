@@ -24,7 +24,6 @@ import type {
   TrackProfileSummary,
 } from '../../shared/types';
 import { DEFAULT_PARAMETERS, mergeTrackParameterWeights, OPTIMIZE_TRIAL_OPTIONS, OPTIMIZE_TRIALS_DEFAULT, DEFAULT_BACKTEST_GOAL } from '../../shared/types';
-import SessionTrackBacktest from '../components/SessionTrackBacktest';
 
 function hitLabel(hit: 'win' | 'top3' | 'miss', winnerRank?: number | null) {
   const className = hit === 'win' ? 'hit-win' : hit === 'top3' ? 'hit-top3' : 'hit-miss';
@@ -51,12 +50,12 @@ function AutoOptimizeBanner({
   onUseResult: (result: BacktestOptimizeResult) => void;
 }) {
   if (status.running) {
+    const displayTrackName = activeTrackName ?? status.trackName ?? 'banan';
     return (
       <div className="auto-opt-banner auto-opt-running">
-        <strong>Optimerar {status.trackName ?? 'banan'}</strong>
+        <strong>Optimerar {displayTrackName}</strong>
         <p className="muted" style={{ margin: '0.35rem 0 0' }}>
-          {status.message ??
-            `Testar viktkombinationer mot ${status.trackName ?? 'banan'}…`}
+          {status.message ?? `Testar viktkombinationer mot ${displayTrackName}…`}
         </p>
         {status.trialsRun > 0 && (
           <p className="muted" style={{ margin: '0.35rem 0 0' }}>
@@ -87,9 +86,25 @@ function AutoOptimizeBanner({
   }
 
   const result = status.lastResult;
+  const resultMatchesProfile =
+    activeProfileTrackId == null || result.atgTrackId === activeProfileTrackId;
+
+  if (!resultMatchesProfile) {
+    return (
+      <div className="auto-opt-banner">
+        <p className="muted" style={{ margin: 0 }}>
+          Senaste sparade optimering gäller <strong>{result.trackName}</strong>, inte{' '}
+          {activeTrackName ?? 'den valda banan'}. Kör <strong>Optimera vikter</strong> nedan för{' '}
+          {activeTrackName ?? 'banan'}.
+        </p>
+      </div>
+    );
+  }
+
+  const displayTrackName = activeTrackName ?? result.trackName;
   return (
     <div className="auto-opt-banner auto-opt-done">
-      <strong>Optimering klar — {result.trackName}</strong>
+      <strong>Optimering klar — {displayTrackName}</strong>
       {status.lastRunAt && (
         <p className="muted" style={{ margin: '0.35rem 0 0' }}>
           Senast körd {new Date(status.lastRunAt).toLocaleString('sv-SE')}
@@ -591,12 +606,6 @@ function BacktestResultCard({
 
 export default function SettingsPage() {
   const [searchParams] = useSearchParams();
-  const initialSessionId = (() => {
-    const raw = searchParams.get('omgang') ?? searchParams.get('session');
-    if (!raw) return null;
-    const id = Number(raw);
-    return Number.isFinite(id) ? id : null;
-  })();
   const [params, setParams] = useState<Parameter[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -916,18 +925,6 @@ export default function SettingsPage() {
           onSelectProfileTrack={(atgTrackId) => setProfileMode(atgTrackId)}
         />
       </div>
-
-      {profileMode !== 'global' && activeTrack && (
-        <div className="card">
-          <h2>3. Testa vikter från omgång mot all historik</h2>
-          <SessionTrackBacktest
-            atgTrackId={activeTrack.atgTrackId}
-            trackName={activeTrack.name}
-            initialSessionId={initialSessionId}
-            onApplyWeights={applySuggestedWeights}
-          />
-        </div>
-      )}
 
       <p className="muted">
         <Link to="/">← Tillbaka till lopp</Link>
