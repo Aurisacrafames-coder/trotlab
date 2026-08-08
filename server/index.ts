@@ -57,7 +57,7 @@ import { importAllGameLegsFromUrl, persistImportedRace } from './importService.j
 import { startTrainerBackfillJob } from './trainerRefresh.js';
 import type { BacktestGoal, Parameter, RaceEntry, RaceSession } from '../shared/types.js';
 import { DEFAULT_BACKTEST_GOAL } from '../shared/types.js';
-import { BULK_IMPORT_LOOKBACK_MONTHS } from '../shared/types.js';
+import { BULK_IMPORT_LOOKBACK_MONTHS, OPTIMIZE_TRIALS_DEFAULT } from '../shared/types.js';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3847;
@@ -765,7 +765,7 @@ app.post('/api/game-sessions/:id/backtest/optimize', async (req, res) => {
       parameters,
       { atgTrackId: game.atgTrackId, gameSessionId },
       goal,
-      { maxTrials: normalizeMaxTrials(maxTrials ?? 10_000) },
+      { maxTrials: normalizeMaxTrials(maxTrials ?? OPTIMIZE_TRIALS_DEFAULT) },
     );
 
     if (result.optimized.hits === result.racesWithResult && result.racesWithResult > 0) {

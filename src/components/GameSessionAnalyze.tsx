@@ -8,12 +8,17 @@ import type {
   BacktestSummary,
   GameSession,
 } from '../../shared/types';
-import { DEFAULT_BACKTEST_GOAL } from '../../shared/types';
+import { DEFAULT_BACKTEST_GOAL, OPTIMIZE_TRIAL_OPTIONS, OPTIMIZE_TRIALS_DEFAULT } from '../../shared/types';
 
-function hitLabel(hit: 'win' | 'top3' | 'miss') {
-  if (hit === 'win') return <span className="hit-win">Träff</span>;
-  if (hit === 'top3') return <span className="hit-top3">Topp 3</span>;
-  return <span className="hit-miss">Miss</span>;
+function hitLabel(hit: 'win' | 'top3' | 'miss', winnerRank?: number | null) {
+  const className = hit === 'win' ? 'hit-win' : hit === 'top3' ? 'hit-top3' : 'hit-miss';
+  const text = hit === 'win' ? 'Träff' : hit === 'top3' ? 'Topp 3' : 'Miss';
+  return (
+    <>
+      <span className={className}>{text}</span>
+      {winnerRank != null && <span className="muted"> · Vinnare rank {winnerRank}</span>}
+    </>
+  );
 }
 
 function CompareBox({
@@ -75,7 +80,7 @@ function ResultTable({ summary }: { summary: BacktestSummary }) {
                   ))}
                 </div>
               </td>
-              <td>{hitLabel(race.hit)}</td>
+              <td>{hitLabel(race.hit, race.winnerRank)}</td>
             </tr>
           ))}
         </tbody>
@@ -86,6 +91,7 @@ function ResultTable({ summary }: { summary: BacktestSummary }) {
 
 export default function GameSessionAnalyze({ game }: { game: GameSession }) {
   const [goal, setGoal] = useState<BacktestGoal>(DEFAULT_BACKTEST_GOAL);
+  const [maxTrials, setMaxTrials] = useState(OPTIMIZE_TRIALS_DEFAULT);
   const [running, setRunning] = useState(false);
   const [optimizing, setOptimizing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -112,7 +118,7 @@ export default function GameSessionAnalyze({ game }: { game: GameSession }) {
     setOptimizing(true);
     setError(null);
     try {
-      const result = await optimizeGameSessionBacktest(game.id, { goal, maxTrials: 10_000 });
+      const result = await optimizeGameSessionBacktest(game.id, { goal, maxTrials });
       setOptimizeResult(result);
       setRunResult(null);
     } catch (e) {
@@ -144,6 +150,21 @@ export default function GameSessionAnalyze({ game }: { game: GameSession }) {
             <option value="top3">Topp 3-träff</option>
           </select>
         </label>
+
+        <label className="backtest-field">
+          <span className="muted">Optimeringsförsök</span>
+          <select
+            value={maxTrials}
+            onChange={(e) => setMaxTrials(Number(e.target.value))}
+            disabled={optimizing}
+          >
+            {OPTIMIZE_TRIAL_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
 
       <div className="backtest-actions">
@@ -156,7 +177,9 @@ export default function GameSessionAnalyze({ game }: { game: GameSession }) {
           onClick={handleOptimize}
           disabled={running || optimizing}
         >
-          {optimizing ? 'Optimerar…' : 'Optimera för denna omgång'}
+          {optimizing
+            ? `Optimerar… (${maxTrials.toLocaleString('sv-SE')} försök)`
+            : 'Optimera för denna omgång'}
         </button>
       </div>
 
@@ -236,6 +259,14 @@ export default function GameSessionAnalyze({ game }: { game: GameSession }) {
             </div>
           )}
 
+          <h3 className="breakdown-title" style={{ marginTop: '1rem' }}>
+            Nuvarande vikter (denna omgång)
+          </h3>
+          <ResultTable summary={optimizeResult.baseline} />
+
+          <h3 className="breakdown-title" style={{ marginTop: '1rem' }}>
+            Optimerade vikter (denna omgång)
+          </h3>
           <ResultTable summary={optimizeResult.optimized} />
         </div>
       )}

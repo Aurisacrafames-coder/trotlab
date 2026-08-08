@@ -223,6 +223,8 @@ export interface BacktestRaceDetail {
   startMethod: string | null;
   topPicks: BacktestPickDetail[];
   hit: 'win' | 'top3' | 'miss';
+  /** Actual race winner's rank in our Trot Score list (1 = top pick). */
+  winnerRank: number | null;
 }
 
 export interface BacktestSummary {

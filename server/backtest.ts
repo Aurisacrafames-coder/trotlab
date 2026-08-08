@@ -407,6 +407,14 @@ function scoreEntries(
   return scored;
 }
 
+function winnerRankInScoring(
+  scored: Array<{ actualPosition: number | null }>,
+): number | null {
+  const index = scored.findIndex((entry) => entry.actualPosition === 1);
+  if (index < 0) return null;
+  return index + 1;
+}
+
 function runBacktestInternal(
   sessions: SessionRow[],
   entryScoresBySession: Map<
@@ -459,6 +467,7 @@ function runBacktestInternal(
         actualPosition: p.actualPosition,
       })),
       hit: hitKind(pickPositions, goal),
+      winnerRank: winnerRankInScoring(scored),
     });
   }
 

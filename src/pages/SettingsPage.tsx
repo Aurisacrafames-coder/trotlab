@@ -25,10 +25,15 @@ import type {
 } from '../../shared/types';
 import { DEFAULT_PARAMETERS, mergeTrackParameterWeights, OPTIMIZE_TRIAL_OPTIONS, OPTIMIZE_TRIALS_DEFAULT, DEFAULT_BACKTEST_GOAL } from '../../shared/types';
 
-function hitLabel(hit: 'win' | 'top3' | 'miss') {
-  if (hit === 'win') return <span className="hit-win">Träff</span>;
-  if (hit === 'top3') return <span className="hit-top3">Topp 3</span>;
-  return <span className="hit-miss">Miss</span>;
+function hitLabel(hit: 'win' | 'top3' | 'miss', winnerRank?: number | null) {
+  const className = hit === 'win' ? 'hit-win' : hit === 'top3' ? 'hit-top3' : 'hit-miss';
+  const text = hit === 'win' ? 'Träff' : hit === 'top3' ? 'Topp 3' : 'Miss';
+  return (
+    <>
+      <span className={className}>{text}</span>
+      {winnerRank != null && <span className="muted"> · Vinnare rank {winnerRank}</span>}
+    </>
+  );
 }
 
 function AutoOptimizeBanner({
@@ -572,7 +577,7 @@ function BacktestResultCard({
                     ))}
                   </div>
                 </td>
-                <td>{hitLabel(race.hit)}</td>
+                <td>{hitLabel(race.hit, race.winnerRank)}</td>
               </tr>
             ))}
           </tbody>
