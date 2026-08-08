@@ -136,6 +136,14 @@ function parseRaceTerms(raw: string | null | undefined): string[] {
   }
 }
 
+function winnerRankInScoring(
+  scored: Array<{ startNumber: number; actualPosition: number | null }>,
+): number | null {
+  const index = scored.findIndex((entry) => entry.actualPosition === 1);
+  if (index < 0) return null;
+  return index + 1;
+}
+
 function loadLegSummary(db: Database.Database, sessionId: number): GameSessionLeg {
   const session = db
     .prepare(
@@ -257,6 +265,7 @@ function loadLegSummary(db: Database.Database, sessionId: number): GameSessionLe
     spikeScore: spike.spikeScore,
     meetsSpikeCriteria: spike.meetsSpikeCriteria,
     topPosition: top?.actualPosition ?? null,
+    winnerRank: winnerRankInScoring(scored),
     hit: topPicks.length > 0
       ? computeLegHit(
           topPicks.map((p) => p.actualPosition),

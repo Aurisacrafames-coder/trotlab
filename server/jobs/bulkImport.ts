@@ -56,6 +56,20 @@ export function getBulkImportStatus(db: Database.Database): BulkImportStatus {
   return loadStoredStatus(db) ?? liveStatus;
 }
 
+export function resetStaleBulkImportStatus(db: Database.Database) {
+  if (importPromise) return;
+  const stored = loadStoredStatus(db);
+  if (!stored?.running) return;
+
+  liveStatus = {
+    ...stored,
+    running: false,
+    message: `${stored.message ?? 'Import avbruten'} (server omstartad)`,
+    finishedAt: new Date().toISOString(),
+  };
+  saveStatus(db, liveStatus);
+}
+
 async function runBulkImport(
   db: Database.Database,
   options: { atgTrackId: number; trackSlug: string; trackName: string; months: number },
@@ -126,18 +140,25 @@ async function runBulkImport(
       return;
     }
 
-    const result = await bulkImportTrackLegs(db, targets, (done, total, _target, error) => {
-      liveStatus = {
-        ...liveStatus,
-        done,
-        total,
-        message: `Importerar ${done}/${total}…`,
-      };
-      if (error) {
-        liveStatus.errors = [...liveStatus.errors, error].slice(-20);
-      }
-      saveStatus(db, liveStatus);
-    });
+    const result = await bulkImportTrackLegs(
+      db,
+      targets,
+      (done, total, _target, stats, error) => {
+        liveStatus = {
+          ...liveStatus,
+          done,
+          total,
+          imported: stats.imported,
+          skipped: stats.skipped,
+          message: `Importerar ${done}/${total}… (${stats.imported} nya, ${stats.skipped} hoppade)`,
+        };
+        if (error) {
+          liveStatus.errors = [...liveStatus.errors, error].slice(-20);
+        }
+        saveStatus(db, liveStatus);
+      },
+      { atgTrackId: options.atgTrackId },
+    );
 
     liveStatus = {
       ...liveStatus,

@@ -118,6 +118,8 @@ export interface GameSessionLeg {
   spikeScore: number | null;
   meetsSpikeCriteria: boolean;
   topPosition: number | null;
+  /** Actual race winner's rank in our Trot Score list (1 = top pick). */
+  winnerRank: number | null;
   hit: 'win' | 'top3' | 'miss' | 'pending' | null;
 }
 

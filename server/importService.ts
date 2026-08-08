@@ -272,19 +272,22 @@ export async function importAllGameLegsFromUrl(
 export async function persistImportedRace(
   db: Database.Database,
   sourceUrl: string,
+  options?: { skipStatsWarmup?: boolean },
 ): Promise<number> {
   const imported = await importFromUrl(sourceUrl.trim());
 
   prefetchImportStats(imported.atgTrackId, [], db);
 
-  if (imported.atgTrackId != null) {
-    const hasDriverTrack = db
-      .prepare('SELECT 1 as ok FROM driver_track_win_stats WHERE track_id = ? LIMIT 1')
-      .get(imported.atgTrackId) as { ok: number } | undefined;
-    await ensureTrackPostStatsForTrack(db, imported.atgTrackId, !hasDriverTrack);
-  }
+  if (!options?.skipStatsWarmup) {
+    if (imported.atgTrackId != null) {
+      const hasDriverTrack = db
+        .prepare('SELECT 1 as ok FROM driver_track_win_stats WHERE track_id = ? LIMIT 1')
+        .get(imported.atgTrackId) as { ok: number } | undefined;
+      await ensureTrackPostStatsForTrack(db, imported.atgTrackId, !hasDriverTrack);
+    }
 
-  await ensureGlobalTrainerCache(db);
+    await ensureGlobalTrainerCache(db);
+  }
 
   for (const entry of imported.entries) {
     if (entry.atgDriverId != null) {
@@ -407,11 +410,26 @@ export async function persistImportedRace(
 export async function bulkImportTrackLegs(
   db: Database.Database,
   targets: LegImportTarget[],
-  onProgress?: (done: number, total: number, target: LegImportTarget, error?: string) => void,
+  onProgress?: (
+    done: number,
+    total: number,
+    target: LegImportTarget,
+    stats: { imported: number; skipped: number },
+    error?: string,
+  ) => void,
+  options?: { atgTrackId?: number },
 ): Promise<{ imported: number; skipped: number; errors: string[] }> {
   let imported = 0;
   let skipped = 0;
   const errors: string[] = [];
+
+  if (options?.atgTrackId != null) {
+    const hasDriverTrack = db
+      .prepare('SELECT 1 as ok FROM driver_track_win_stats WHERE track_id = ? LIMIT 1')
+      .get(options.atgTrackId) as { ok: number } | undefined;
+    await ensureTrackPostStatsForTrack(db, options.atgTrackId, !hasDriverTrack);
+    await ensureGlobalTrainerCache(db);
+  }
 
   for (let i = 0; i < targets.length; i++) {
     const target = targets[i];
@@ -422,19 +440,23 @@ export async function bulkImportTrackLegs(
 
       if (exists) {
         skipped++;
-        onProgress?.(i + 1, targets.length, target);
+        onProgress?.(i + 1, targets.length, target, { imported, skipped });
         continue;
       }
 
-      await persistImportedRace(db, target.url);
+      await persistImportedRace(db, target.url, { skipStatsWarmup: true });
       imported++;
-      onProgress?.(i + 1, targets.length, target);
+      onProgress?.(i + 1, targets.length, target, { imported, skipped });
       await sleep(250);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       errors.push(`${target.date} ${target.gameType} avd ${target.leg}: ${message}`);
-      onProgress?.(i + 1, targets.length, target, message);
+      onProgress?.(i + 1, targets.length, target, { imported, skipped }, message);
       await sleep(250);
+    }
+
+    if ((i + 1) % 5 === 0) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
     }
   }
 

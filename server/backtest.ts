@@ -17,6 +17,7 @@ export interface BacktestFilter {
   atgTrackId: number;
   startMethod?: 'auto' | 'volte' | null;
   gameType?: string | null;
+  gameSessionId?: number;
 }
 
 interface SessionRow {
@@ -291,6 +292,10 @@ function loadSessions(db: Database.Database, filter: BacktestFilter): SessionRow
   if (filter.gameType) {
     sql += ` AND game_type = ?`;
     args.push(filter.gameType);
+  }
+  if (filter.gameSessionId != null) {
+    sql += ` AND game_session_id = ?`;
+    args.push(filter.gameSessionId);
   }
 
   sql += ` ORDER BY date, leg_number`;

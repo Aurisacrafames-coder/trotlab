@@ -1,6 +1,7 @@
 import type {
   AutoOptimizerStatus,
   BacktestGoal,
+  BacktestOptimizeResult,
   BacktestSummary,
   BacktestTrackOption,
   BulkImportStatus,
@@ -256,6 +257,24 @@ export const optimizeBacktest = (body: {
   maxTrials?: number;
 }) =>
   api<AutoOptimizerStatus>('/backtest/optimize', { method: 'POST', body: JSON.stringify(body) });
+
+export const runGameSessionBacktest = (
+  gameSessionId: number,
+  body: { goal: BacktestGoal },
+) =>
+  api<BacktestSummary>(`/game-sessions/${gameSessionId}/backtest/run`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+
+export const optimizeGameSessionBacktest = (
+  gameSessionId: number,
+  body: { goal: BacktestGoal; maxTrials?: number },
+) =>
+  api<BacktestOptimizeResult>(`/game-sessions/${gameSessionId}/backtest/optimize`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
 
 export const fetchAutoOptimizerStatus = (atgTrackId?: number) =>
   api<AutoOptimizerStatus>(

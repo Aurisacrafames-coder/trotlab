@@ -158,12 +158,24 @@ export function parseAtgUrl(url: string): (ParsedAtgUrl & { raceId?: string }) |
   return null;
 }
 
-export async function atgFetch<T>(path: string): Promise<T> {
-  const res = await fetch(`${ATG_BASE}${path}`, {
-    headers: { Accept: 'application/json' },
-  });
-  if (!res.ok) throw new Error(`ATG API fel ${res.status}: ${path}`);
-  return res.json() as Promise<T>;
+export async function atgFetch<T>(path: string, timeoutMs = 30_000): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${ATG_BASE}${path}`, {
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`ATG API fel ${res.status}: ${path}`);
+    return res.json() as Promise<T>;
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error(`ATG API timeout (${timeoutMs / 1000}s): ${path}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 interface CalendarDay {

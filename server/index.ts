@@ -19,7 +19,7 @@ import {
 import { startStatsSyncJob } from './jobs/syncStats.js';
 import { getAutoOptimizerStatus, scheduleAutoOptimize, startAutoOptimizeJob } from './jobs/autoOptimize.js';
 import { startEarningsRefreshJob } from './jobs/refreshEarnings.js';
-import { listBacktestTracks, normalizeMaxTrials, runBacktest } from './backtest.js';
+import { listBacktestTracks, normalizeMaxTrials, optimizeWeights, runBacktest } from './backtest.js';
 import { refreshAllGameSessionRaceInfo } from './raceInfoRefresh.js';
 import { saveUserSystem, validateUserSystemLegs } from './userSystem.js';
 import {
@@ -29,7 +29,7 @@ import {
   getActiveWatchlistIdSet,
   WATCHLIST_DAYS,
 } from './watchlist.js';
-import { getBulkImportStatus, scheduleBulkImport } from './jobs/bulkImport.js';
+import { getBulkImportStatus, resetStaleBulkImportStatus, scheduleBulkImport } from './jobs/bulkImport.js';
 import { listKnownTracks } from './atg.js';
 import {
   getParameters as loadParameters,
@@ -708,6 +708,77 @@ app.post('/api/game-sessions/:id/fetch-results', async (req, res) => {
   }
 });
 
+app.post('/api/game-sessions/:id/backtest/run', (req, res) => {
+  const gameSessionId = parseInt(req.params.id, 10);
+  const db = getDb();
+  const game = loadGameSession(db, gameSessionId);
+  if (!game) return res.status(404).json({ error: 'Omgång hittades inte' });
+  if (game.atgTrackId == null) {
+    return res.status(400).json({ error: 'Omgången saknar ban-id — kan inte analyseras' });
+  }
+  if (game.legsWithResults === 0) {
+    return res.status(400).json({ error: 'Inga avdelningar med resultat — hämta resultat först' });
+  }
+
+  const { goal, weights } = req.body as { goal?: BacktestGoal; weights?: Parameter[] };
+  if (goal !== 'win' && goal !== 'top3') {
+    return res.status(400).json({ error: 'goal måste vara win eller top3' });
+  }
+
+  const raceIds = getRaceIdsForGame(db, gameSessionId);
+  const parameters =
+    weights?.length ? weights : raceIds.length > 0 ? getScoringParameters(db, raceIds[0]) : getParameters();
+
+  const result = runBacktest(
+    db,
+    parameters,
+    { atgTrackId: game.atgTrackId, gameSessionId },
+    goal,
+  );
+  res.json(result);
+});
+
+app.post('/api/game-sessions/:id/backtest/optimize', async (req, res) => {
+  try {
+    const gameSessionId = parseInt(req.params.id, 10);
+    const db = getDb();
+    const game = loadGameSession(db, gameSessionId);
+    if (!game) return res.status(404).json({ error: 'Omgång hittades inte' });
+    if (game.atgTrackId == null) {
+      return res.status(400).json({ error: 'Omgången saknar ban-id — kan inte analyseras' });
+    }
+    if (game.legsWithResults === 0) {
+      return res.status(400).json({ error: 'Inga avdelningar med resultat — hämta resultat först' });
+    }
+
+    const { goal, maxTrials } = req.body as { goal?: BacktestGoal; maxTrials?: number };
+    if (goal !== 'win' && goal !== 'top3') {
+      return res.status(400).json({ error: 'goal måste vara win eller top3' });
+    }
+
+    const raceIds = getRaceIdsForGame(db, gameSessionId);
+    const parameters =
+      raceIds.length > 0 ? getScoringParameters(db, raceIds[0]) : getParameters();
+
+    const result = await optimizeWeights(
+      db,
+      parameters,
+      { atgTrackId: game.atgTrackId, gameSessionId },
+      goal,
+      { maxTrials: normalizeMaxTrials(maxTrials ?? 10_000) },
+    );
+
+    if (result.optimized.hits === result.racesWithResult && result.racesWithResult > 0) {
+      result.message = `Alla ${result.racesWithResult} avdelningar hade träff med optimerade vikter.`;
+    }
+
+    res.json(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Optimering misslyckades';
+    res.status(500).json({ error: message });
+  }
+});
+
 function parseStatsFilters(query: express.Request['query']): StatsFilters {
   const str = (key: string) => {
     const value = query[key];
@@ -956,6 +1027,7 @@ if (fs.existsSync(path.join(distPath, 'index.html'))) {
 
 app.listen(PORT, HOST, () => {
   const db = getDb();
+  resetStaleBulkImportStatus(db);
   const driverBackfill = backfillDriverV85WinPct(db);
   if (driverBackfill.entriesUpdated > 0) {
     console.log(`Kusk %: ${driverBackfill.entriesUpdated} rader synkade från cache`);

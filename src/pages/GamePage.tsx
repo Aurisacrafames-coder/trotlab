@@ -38,6 +38,7 @@ import { formatStartMethodLabel } from '../../shared/scoring';
 
 import { MIN_SPIKE_MARGIN, MIN_SPIKE_TOP_SCORE } from '../../shared/spikeSuggestions';
 import RankingExportPanel from '../components/RankingExportPanel';
+import GameSessionAnalyze from '../components/GameSessionAnalyze';
 
 
 
@@ -53,32 +54,30 @@ function formatDateTime(iso: string) {
 
 
 
-function hitLabel(hit: GameSessionLeg['hit']) {
-
+function hitLabel(hit: GameSessionLeg['hit'], winnerRank: number | null | undefined) {
+  let label: string;
   switch (hit) {
-
     case 'win':
-
-      return 'Träff';
-
+      label = 'Träff';
+      break;
     case 'top3':
-
-      return 'Topp 3';
-
+      label = 'Topp 3';
+      break;
     case 'miss':
-
-      return 'Miss';
-
+      label = 'Miss';
+      break;
     case 'pending':
-
-      return 'Väntar';
-
+      label = 'Väntar';
+      break;
     default:
-
-      return '—';
-
+      label = '—';
   }
 
+  if (hit && hit !== 'pending' && winnerRank != null) {
+    return `${label} · Vinnare rank ${winnerRank}`;
+  }
+
+  return label;
 }
 
 
@@ -473,6 +472,10 @@ export default function GamePage() {
 
 
 
+      <GameSessionAnalyze game={game} />
+
+
+
       {game.legs.length > 0 && (
 
         <div className="card">
@@ -805,7 +808,7 @@ export default function GamePage() {
 
                     <div className="game-leg-card-actions">
 
-                      <span className={hitClass(leg.hit)}>{hitLabel(leg.hit)}</span>
+                      <span className={hitClass(leg.hit)}>{hitLabel(leg.hit, leg.winnerRank)}</span>
 
                       <Link to={`/lopp/${leg.id}`}>Öppna lopp</Link>
 

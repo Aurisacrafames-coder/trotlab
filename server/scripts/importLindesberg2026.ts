@@ -31,7 +31,7 @@ const byDate = targets.reduce<Record<string, number>>((acc, t) => {
 console.log('Omgångar per datum:', byDate);
 
 let lastLog = '';
-const result = await bulkImportTrackLegs(db, targets, (done, total, target, error) => {
+const result = await bulkImportTrackLegs(db, targets, (done, total, target, _stats, error) => {
   const line = `[${done}/${total}] ${target.date} ${target.gameType} avd ${target.leg}${error ? ` — FEL: ${error}` : ''}`;
   if (line !== lastLog) {
     console.log(line);
