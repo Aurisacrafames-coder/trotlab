@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { optimizeGameSessionBacktest, runGameSessionBacktest } from '../api';
+import { optimizeGameSessionBacktest, runBacktest, runGameSessionBacktest } from '../api';
 import { formatActualPosition, formatGameLegLabel, formatWeightValue } from '../../shared/format';
 import type {
   BacktestGoal,
   BacktestOptimizeResult,
   BacktestSummary,
   GameSession,
+  Parameter,
 } from '../../shared/types';
 import { DEFAULT_BACKTEST_GOAL, OPTIMIZE_TRIAL_OPTIONS, OPTIMIZE_TRIALS_DEFAULT } from '../../shared/types';
 
@@ -97,8 +98,61 @@ export default function GameSessionAnalyze({ game }: { game: GameSession }) {
   const [error, setError] = useState<string | null>(null);
   const [runResult, setRunResult] = useState<BacktestSummary | null>(null);
   const [optimizeResult, setOptimizeResult] = useState<BacktestOptimizeResult | null>(null);
+  const [trackBaselineResult, setTrackBaselineResult] = useState<BacktestSummary | null>(null);
+  const [trackSessionResult, setTrackSessionResult] = useState<BacktestSummary | null>(null);
+  const [trackTesting, setTrackTesting] = useState(false);
 
   if (game.legsWithResults === 0) return null;
+
+  function clearTrackResults() {
+    setTrackBaselineResult(null);
+    setTrackSessionResult(null);
+  }
+
+  async function testWeightsOnTrack(weights: Parameter[]) {
+    if (game.atgTrackId == null) {
+      throw new Error('Omgången saknar ban-id');
+    }
+    return runBacktest({
+      atgTrackId: game.atgTrackId,
+      goal,
+      weights,
+    });
+  }
+
+  async function handleTestCurrentOnTrack() {
+    if (!runResult) return;
+    setTrackTesting(true);
+    setError(null);
+    clearTrackResults();
+    try {
+      const result = await testWeightsOnTrack(runResult.weights);
+      setTrackBaselineResult(result);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ban-test misslyckades');
+    } finally {
+      setTrackTesting(false);
+    }
+  }
+
+  async function handleTestSessionWeightsOnTrack() {
+    if (!optimizeResult) return;
+    setTrackTesting(true);
+    setError(null);
+    clearTrackResults();
+    try {
+      const [baseline, sessionWeights] = await Promise.all([
+        testWeightsOnTrack(optimizeResult.baseline.weights),
+        testWeightsOnTrack(optimizeResult.optimized.weights),
+      ]);
+      setTrackBaselineResult(baseline);
+      setTrackSessionResult(sessionWeights);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ban-test misslyckades');
+    } finally {
+      setTrackTesting(false);
+    }
+  }
 
   async function handleRun() {
     setRunning(true);
@@ -107,6 +161,7 @@ export default function GameSessionAnalyze({ game }: { game: GameSession }) {
       const result = await runGameSessionBacktest(game.id, { goal });
       setRunResult(result);
       setOptimizeResult(null);
+      clearTrackResults();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Analys misslyckades');
     } finally {
@@ -121,6 +176,7 @@ export default function GameSessionAnalyze({ game }: { game: GameSession }) {
       const result = await optimizeGameSessionBacktest(game.id, { goal, maxTrials });
       setOptimizeResult(result);
       setRunResult(null);
+      clearTrackResults();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Optimering misslyckades');
     } finally {
@@ -200,6 +256,30 @@ export default function GameSessionAnalyze({ game }: { game: GameSession }) {
             {runResult.hits === runResult.racesWithResult ? ' — alla rätt!' : ''}
           </p>
           <ResultTable summary={runResult} />
+          {game.atgTrackId != null && (
+            <div className="backtest-actions" style={{ marginTop: '0.75rem' }}>
+              <button
+                type="button"
+                className="secondary"
+                onClick={handleTestCurrentOnTrack}
+                disabled={trackTesting || running || optimizing}
+              >
+                {trackTesting
+                  ? 'Testar mot banan…'
+                  : `Testa mot alla lopp på ${game.trackName}`}
+              </button>
+            </div>
+          )}
+          {trackBaselineResult && !trackSessionResult && (
+            <div style={{ marginTop: '1rem' }}>
+              <h3 className="breakdown-title">Nuvarande vikter — hela {game.trackName}</h3>
+              <p className="muted">
+                {trackBaselineResult.hits}/{trackBaselineResult.racesWithResult} träffar
+                {trackBaselineResult.hitRate != null ? ` (${trackBaselineResult.hitRate}%)` : ''}
+                {' '}· {trackBaselineResult.racesWithResult} avdelningar med resultat i databasen
+              </p>
+            </div>
+          )}
         </div>
       )}
 
@@ -256,6 +336,56 @@ export default function GameSessionAnalyze({ game }: { game: GameSession }) {
               <p className="muted" style={{ marginTop: '0.5rem', marginBottom: 0 }}>
                 Gå till <Link to={settingsLink}>Inställningar</Link> för att spara vikterna på banan.
               </p>
+            </div>
+          )}
+
+          {game.atgTrackId != null && (
+            <div className="backtest-actions" style={{ marginTop: '0.75rem' }}>
+              <button
+                type="button"
+                className="secondary"
+                onClick={handleTestSessionWeightsOnTrack}
+                disabled={trackTesting || running || optimizing}
+              >
+                {trackTesting
+                  ? 'Testar mot banan…'
+                  : `Testa omgångens vikter mot alla lopp på ${game.trackName}`}
+              </button>
+            </div>
+          )}
+
+          {trackBaselineResult && trackSessionResult && (
+            <div style={{ marginTop: '1rem' }}>
+              <h3 className="breakdown-title">Träff på hela {game.trackName}</h3>
+              <p className="muted" style={{ marginTop: 0 }}>
+                {trackSessionResult.racesWithResult} avdelningar med resultat i databasen
+              </p>
+              <div className="backtest-compare" style={{ marginTop: '0.75rem' }}>
+                <CompareBox
+                  label="Nuvarande banprofil"
+                  hits={trackBaselineResult.hits}
+                  total={trackBaselineResult.racesWithResult}
+                  hitRate={trackBaselineResult.hitRate}
+                />
+                <div className="backtest-compare-arrow">→</div>
+                <CompareBox
+                  label="Omgångens vikter"
+                  hits={trackSessionResult.hits}
+                  total={trackSessionResult.racesWithResult}
+                  hitRate={trackSessionResult.hitRate}
+                  highlight={trackSessionResult.hits > trackBaselineResult.hits}
+                />
+              </div>
+              {trackSessionResult.hits !== trackBaselineResult.hits && (
+                <p
+                  className={trackSessionResult.hits > trackBaselineResult.hits ? 'hit-win' : 'hit-miss'}
+                  style={{ marginTop: '0.75rem', marginBottom: 0 }}
+                >
+                  {trackSessionResult.hits > trackBaselineResult.hits ? '+' : ''}
+                  {trackSessionResult.hits - trackBaselineResult.hits} träffar jämfört med nuvarande
+                  banprofil på alla importerade lopp.
+                </p>
+              )}
             </div>
           )}
 
