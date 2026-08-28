@@ -1,5 +1,11 @@
 import type Database from 'better-sqlite3';
-import { atgFetch, importFromUrl, parseAtgUrl, resolveRaceId, TRACK_SLUGS } from './atg.js';
+import { atgFetch, importFromUrl, parseAtgUrl, resolveCalendarGameFromUrl, resolveRaceId, TRACK_SLUGS } from './atg.js';
+import {
+  beginImportProgress,
+  clearImportProgress,
+  finishImportProgress,
+  updateImportProgress,
+} from './importProgress.js';
 import { ensureGlobalTrainerCache, ensureTrackPostStatsForTrack, getDriverGlobalWinPercentCached, getDriverTrackWinPercentCached, getTrainerWinPercentCached, getTrackPostWinPercentCached, prefetchImportStats } from './atgStats.js';
 import { findOrCreateGameSession, linkRaceToGameSession } from './gameSessions.js';
 import { recalculateSessionScores } from './sessionScores.js';
@@ -195,40 +201,12 @@ export function isGameDivisionUrl(url: string): boolean {
 }
 
 export async function discoverGameLegsFromUrl(sourceUrl: string): Promise<LegImportTarget[]> {
-  const parsed = parseAtgUrl(sourceUrl.trim());
-  if (!parsed || parsed.gameType === 'VINNARE' || parsed.gameType === 'UNKNOWN') {
-    throw new Error('Länken måste vara till en avdelning i V86, V85, GS75, V64 …');
-  }
-
-  const calendar = await atgFetch<{
-    games?: Record<string, Array<{ id: string; races: string[] }>>;
-  }>(`/calendar/day/${parsed.date}`);
-
-  const gameType = parsed.gameType;
-  const games =
-    calendar.games?.[gameType] ??
-    calendar.games?.[gameType.toLowerCase()] ??
-    calendar.games?.[gameType.toUpperCase()] ??
-    [];
-
-  const trackId = TRACK_SLUGS[parsed.trackSlug.toLowerCase()];
-  let game = trackId != null ? games.find((g) => g.id.includes(`_${trackId}_`)) : undefined;
-
-  if (!game) {
-    const raceId = await resolveRaceId(parsed);
-    game = games.find((g) => g.races.includes(raceId));
-  }
-
-  if (!game?.races.length) {
-    throw new Error(
-      `Kunde inte hitta ${gameType} på ${parsed.date} (${parsed.trackSlug}). Kontrollera länken.`,
-    );
-  }
+  const { parsed, venue, game } = await resolveCalendarGameFromUrl(sourceUrl);
 
   return game.races.map((raceId, index) => ({
-    url: `https://www.atg.se/spel/${parsed.date}/${gameType}/${parsed.trackSlug}/avd/${index + 1}`,
+    url: `https://www.atg.se/spel/${parsed.date}/${parsed.gameType}/${venue.venueSlug}/avd/${index + 1}`,
     date: parsed.date,
-    gameType,
+    gameType: parsed.gameType,
     leg: index + 1,
     raceId,
   }));
@@ -238,45 +216,88 @@ export async function importAllGameLegsFromUrl(
   db: Database.Database,
   sourceUrl: string,
 ): Promise<{ gameSessionId: number; imported: number; total: number; errors: string[] }> {
-  const targets = await discoverGameLegsFromUrl(sourceUrl);
-  let gameSessionId: number | null = null;
+  const { parsed, venue, game } = await resolveCalendarGameFromUrl(sourceUrl);
+  const targets = game.races.map((raceId, index) => ({
+    url: `https://www.atg.se/spel/${parsed.date}/${parsed.gameType}/${venue.venueSlug}/avd/${index + 1}`,
+    date: parsed.date,
+    gameType: parsed.gameType,
+    leg: index + 1,
+    raceId,
+  }));
+
+  beginImportProgress(targets.length, `Importerar ${parsed.gameType} ${venue.displayName}`);
+
+  const gameSessionId = findOrCreateGameSession(db, {
+    gameType: parsed.gameType,
+    date: parsed.date,
+    trackName: venue.displayName,
+    atgTrackId: venue.isMultiTrack ? null : venue.trackIds[0] ?? null,
+    venueSlug: venue.venueSlug,
+    atgGameId: game.id,
+  });
+
   let imported = 0;
   const errors: string[] = [];
+  const warmedTrackIds = new Set<number>();
 
-  for (const target of targets) {
-    try {
-      const sessionId = await persistImportedRace(db, target.url);
-      imported++;
-      const row = db
-        .prepare('SELECT game_session_id AS id FROM race_sessions WHERE id = ?')
-        .get(sessionId) as { id: number | null } | undefined;
-      if (row?.id) gameSessionId = row.id;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      errors.push(`Avd ${target.leg}: ${message}`);
+  try {
+    for (const target of targets) {
+      updateImportProgress({
+        currentLeg: target.leg,
+        importedLegs: imported,
+        phase: `Avd ${target.leg} av ${targets.length} — hämtar hästar från ATG`,
+      });
+
+      try {
+        await persistImportedRace(db, target.url, { gameSessionId, skipStatsWarmup: true });
+        imported++;
+        updateImportProgress({ importedLegs: imported });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        errors.push(`Avd ${target.leg}: ${message}`);
+      }
     }
-    await sleep(250);
-  }
 
-  if (gameSessionId == null) {
-    throw new Error(
-      errors.length > 0
-        ? errors.join('; ')
-        : 'Importen misslyckades — inga avdelningar kunde importeras.',
-    );
-  }
+    if (imported === 0) {
+      throw new Error(
+        errors.length > 0
+          ? errors.join('; ')
+          : 'Importen misslyckades — inga avdelningar kunde importeras.',
+      );
+    }
 
-  return { gameSessionId, imported, total: targets.length, errors };
+    const trackIds = db
+      .prepare(
+        `SELECT DISTINCT atg_track_id as atgTrackId
+         FROM race_sessions WHERE game_session_id = ? AND atg_track_id IS NOT NULL`,
+      )
+      .all(gameSessionId) as Array<{ atgTrackId: number }>;
+    for (const row of trackIds) {
+      if (!warmedTrackIds.has(row.atgTrackId)) {
+        warmedTrackIds.add(row.atgTrackId);
+        prefetchImportStats(row.atgTrackId, [], db);
+      }
+    }
+
+    finishImportProgress(imported);
+    return { gameSessionId, imported, total: targets.length, errors };
+  } finally {
+    setTimeout(() => clearImportProgress(), 8000);
+  }
 }
 
 export async function persistImportedRace(
   db: Database.Database,
   sourceUrl: string,
-  options?: { skipStatsWarmup?: boolean },
+  options?: { skipStatsWarmup?: boolean; gameSessionId?: number },
 ): Promise<number> {
-  const imported = await importFromUrl(sourceUrl.trim());
+  const imported = await importFromUrl(sourceUrl.trim(), {
+    startFetchConcurrency: options?.skipStatsWarmup ? 6 : 5,
+  });
 
-  prefetchImportStats(imported.atgTrackId, [], db);
+  if (!options?.skipStatsWarmup) {
+    prefetchImportStats(imported.atgTrackId, [], db);
+  }
 
   if (!options?.skipStatsWarmup) {
     if (imported.atgTrackId != null) {
@@ -395,13 +416,37 @@ export async function persistImportedRace(
 
   recalculateSessionScores(db, sessionId);
 
-  const gameSessionId = findOrCreateGameSession(db, {
-    gameType: imported.gameType,
-    date: imported.date,
-    trackName: imported.trackName,
-    atgTrackId: imported.atgTrackId,
-  });
-  linkRaceToGameSession(db, sessionId, gameSessionId);
+  if (options?.gameSessionId != null) {
+    linkRaceToGameSession(db, sessionId, options.gameSessionId);
+  } else {
+    const parsed = parseAtgUrl(sourceUrl.trim());
+    let venueSlug: string | null = null;
+    let atgGameId: string | null = null;
+    let trackName = imported.trackName;
+    let atgTrackId: number | null = imported.atgTrackId;
+
+    if (parsed && parsed.gameType !== 'VINNARE' && parsed.gameType !== 'UNKNOWN') {
+      try {
+        const resolved = await resolveCalendarGameFromUrl(sourceUrl);
+        venueSlug = resolved.venue.venueSlug;
+        atgGameId = resolved.game.id;
+        trackName = resolved.venue.displayName;
+        atgTrackId = resolved.venue.isMultiTrack ? null : resolved.venue.trackIds[0] ?? null;
+      } catch {
+        // Enstaka avdelning utan hel omgång i kalendern — fall back till loppets bana.
+      }
+    }
+
+    const gameSessionId = findOrCreateGameSession(db, {
+      gameType: imported.gameType,
+      date: imported.date,
+      trackName,
+      atgTrackId,
+      venueSlug,
+      atgGameId,
+    });
+    linkRaceToGameSession(db, sessionId, gameSessionId);
+  }
 
   invalidateTrackStatsCache();
   return sessionId;

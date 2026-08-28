@@ -11,6 +11,7 @@ import type {
   RaceSession,
   StatsSummary,
   TrackProfileSummary,
+  TrackMissAnalysis,
 } from '../shared/types';
 import { DEFAULT_BACKTEST_GOAL } from '../shared/types';
 
@@ -196,6 +197,17 @@ export interface ImportGameResult {
   errors: string[];
 }
 
+export interface ImportProgress {
+  running: boolean;
+  phase: string;
+  currentLeg: number;
+  totalLegs: number;
+  importedLegs: number;
+  startedAt: string;
+}
+
+export const fetchImportProgress = () => api<ImportProgress | null>('/import/status');
+
 export const importRace = (url: string, allLegs = false) =>
   allLegs
     ? api<ImportGameResult>('/import', { method: 'POST', body: JSON.stringify({ url, allLegs: true }) })
@@ -242,6 +254,8 @@ export const syncTrackStats = () =>
   });
 
 export const fetchBacktestTracks = () => api<BacktestTrackOption[]>('/backtest/tracks');
+export const fetchTrackMissAnalysis = (body: { atgTrackId: number; goal: BacktestGoal }) =>
+  api<TrackMissAnalysis>('/backtest/miss-analysis', { method: 'POST', body: JSON.stringify(body) });
 export const runBacktest = (body: {
   atgTrackId: number;
   startMethod?: 'auto' | 'volte' | null;
@@ -314,6 +328,16 @@ export const fetchGameSessions = () => api<GameSessionListItem[]>('/game-session
 export const deleteGameSession = (id: number) =>
   api<{ ok: true }>(`/game-sessions/${id}`, { method: 'DELETE' });
 export const fetchGameSession = (id: number) => api<GameSession>(`/game-sessions/${id}`);
+
+export interface GameRankingExport {
+  title: string;
+  filename: string;
+  html: string;
+  plainText: string;
+}
+
+export const fetchGameRankingExport = (id: number) =>
+  api<GameRankingExport>(`/game-sessions/${id}/ranking-export`);
 export const saveGameUserSystem = (
   id: number,
   legs: Array<{ legId: number; startNumbers: number[] }>,

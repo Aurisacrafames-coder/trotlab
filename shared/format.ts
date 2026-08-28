@@ -15,6 +15,14 @@ const KM_TIME_CODES: Record<string, string> = {
   k: 'K',
 };
 
+/** Distansband för bananalys — 1640 m räknas som kort. */
+export function distanceBandLabel(distance: number | null): string {
+  if (distance == null) return 'Okänd distans';
+  if (distance <= 1640) return `Kort (${distance} m)`;
+  if (distance <= 2140) return `Mellan (${distance} m)`;
+  return `Lång (${distance} m)`;
+}
+
 export function formatKmTimeLabel(value: string | null | undefined): string | null {
   if (value == null || value === '') return null;
   const mapped = KM_TIME_CODES[value.toLowerCase()];

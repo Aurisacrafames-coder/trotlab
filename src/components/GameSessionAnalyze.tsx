@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
-  fetchBacktestTracks,
   optimizeGameSessionBacktest,
   runBacktest,
   runGameSessionBacktest,
+  saveTrackProfile,
 } from '../api';
 import { formatActualPosition, formatGameLegLabel, formatWeightValue } from '../../shared/format';
 import type {
@@ -15,7 +15,7 @@ import type {
   Parameter,
 } from '../../shared/types';
 import { DEFAULT_BACKTEST_GOAL, OPTIMIZE_TRIAL_OPTIONS, OPTIMIZE_TRIALS_DEFAULT } from '../../shared/types';
-import { TrackWideResultPanel } from './TrackWideBacktestResult';
+import { TrackHitSummary } from './TrackHitSummary';
 
 function hitLabel(hit: 'win' | 'top3' | 'miss', winnerRank?: number | null) {
   const className = hit === 'win' ? 'hit-win' : hit === 'top3' ? 'hit-top3' : 'hit-miss';
@@ -30,14 +30,12 @@ function hitLabel(hit: 'win' | 'top3' | 'miss', winnerRank?: number | null) {
 
 function CompareBox({
   label,
-  subtitle,
   hits,
   total,
   hitRate,
   highlight,
 }: {
   label: string;
-  subtitle?: string;
   hits: number;
   total: number;
   hitRate: number | null;
@@ -46,7 +44,6 @@ function CompareBox({
   return (
     <div className={`backtest-compare-box${highlight ? ' backtest-compare-box-highlight' : ''}`}>
       <div className="muted">{label}</div>
-      {subtitle && <div className="compare-box-subtitle">{subtitle}</div>}
       <div className="backtest-compare-value">
         {hits}/{total}
       </div>
@@ -105,43 +102,17 @@ export default function GameSessionAnalyze({ game }: { game: GameSession }) {
   const [running, setRunning] = useState(false);
   const [optimizing, setOptimizing] = useState(false);
   const [trackTesting, setTrackTesting] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [runResult, setRunResult] = useState<BacktestSummary | null>(null);
   const [optimizeResult, setOptimizeResult] = useState<BacktestOptimizeResult | null>(null);
-  const [trackBaselineResult, setTrackBaselineResult] = useState<BacktestSummary | null>(null);
-  const [trackSessionResult, setTrackSessionResult] = useState<BacktestSummary | null>(null);
-  const [trackRaceCount, setTrackRaceCount] = useState<number | null>(null);
-  const trackResultRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (game.atgTrackId == null) {
-      setTrackRaceCount(null);
-      return;
-    }
-    fetchBacktestTracks()
-      .then((tracks) => {
-        const track = tracks.find((t) => t.atgTrackId === game.atgTrackId);
-        setTrackRaceCount(track?.racesWithResult ?? null);
-      })
-      .catch(() => setTrackRaceCount(null));
-  }, [game.atgTrackId]);
-
-  useEffect(() => {
-    if ((trackSessionResult || trackBaselineResult) && trackResultRef.current) {
-      trackResultRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }
-  }, [trackBaselineResult, trackSessionResult]);
+  const [trackHitResult, setTrackHitResult] = useState<BacktestSummary | null>(null);
 
   if (game.legsWithResults === 0) return null;
 
   const sessionLabel = `${game.gameType} ${game.date}`;
-  const settingsLink =
-    game.atgTrackId != null ? `/installningar?bana=${game.atgTrackId}` : '/installningar';
-
-  function clearTrackResults() {
-    setTrackBaselineResult(null);
-    setTrackSessionResult(null);
-  }
+  const newWeights = optimizeResult?.optimized.weights ?? null;
 
   async function testWeightsOnTrack(weights: Parameter[]) {
     if (game.atgTrackId == null) {
@@ -154,26 +125,15 @@ export default function GameSessionAnalyze({ game }: { game: GameSession }) {
     });
   }
 
-  async function handleTestOnTrack(weights: Parameter[], compareBaseline?: Parameter[]) {
+  async function runTrackHitTest(weights: Parameter[]) {
     setTrackTesting(true);
-    setError(null);
-    clearTrackResults();
+    setTrackHitResult(null);
+    setSaveMessage(null);
     try {
-      if (compareBaseline) {
-        const [baseline, sessionWeights] = await Promise.all([
-          testWeightsOnTrack(compareBaseline),
-          testWeightsOnTrack(weights),
-        ]);
-        setTrackBaselineResult(baseline);
-        setTrackSessionResult(sessionWeights);
-        setTrackRaceCount(sessionWeights.racesWithResult);
-      } else {
-        const result = await testWeightsOnTrack(weights);
-        setTrackBaselineResult(result);
-        setTrackRaceCount(result.racesWithResult);
-      }
+      const result = await testWeightsOnTrack(weights);
+      setTrackHitResult(result);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Ban-test misslyckades');
+      setError(e instanceof Error ? e.message : 'Kunde inte beräkna träffprocent');
     } finally {
       setTrackTesting(false);
     }
@@ -182,7 +142,8 @@ export default function GameSessionAnalyze({ game }: { game: GameSession }) {
   async function handleRun() {
     setRunning(true);
     setError(null);
-    clearTrackResults();
+    setTrackHitResult(null);
+    setSaveMessage(null);
     try {
       const result = await runGameSessionBacktest(game.id, { goal });
       setRunResult(result);
@@ -197,11 +158,15 @@ export default function GameSessionAnalyze({ game }: { game: GameSession }) {
   async function handleOptimize() {
     setOptimizing(true);
     setError(null);
-    clearTrackResults();
+    setTrackHitResult(null);
+    setSaveMessage(null);
     try {
       const result = await optimizeGameSessionBacktest(game.id, { goal, maxTrials });
       setOptimizeResult(result);
       setRunResult(null);
+      if (game.atgTrackId != null) {
+        await runTrackHitTest(result.optimized.weights);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Optimering misslyckades');
     } finally {
@@ -209,36 +174,27 @@ export default function GameSessionAnalyze({ game }: { game: GameSession }) {
     }
   }
 
-  const weightsForTrackTest = optimizeResult?.optimized.weights ?? runResult?.weights ?? null;
-  const baselineForTrackCompare = optimizeResult?.baseline.weights ?? null;
-  const trackTestLabel =
-    trackRaceCount != null
-      ? `Testa mot all historik på ${game.trackName} (${trackRaceCount} lopp)`
-      : `Testa mot all historik på ${game.trackName}`;
+  async function handleSaveTrackWeights() {
+    if (game.atgTrackId == null || !newWeights) return;
+    setSaving(true);
+    setSaveMessage(null);
+    setError(null);
+    try {
+      await saveTrackProfile(game.atgTrackId, game.trackName, newWeights);
+      setSaveMessage(`Sparat — ${game.trackName} använder nu de nya vikterna.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Kunde inte spara vikter');
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
     <div className="card">
       <h2>Analysera omgång</h2>
-
-      <div className="profile-context-box" style={{ marginTop: 0 }}>
-        <strong>{sessionLabel}</strong>
-        <span className="muted">
-          {' '}· {game.trackName} · {game.legsWithResults}/{game.legCount} avdelningar med resultat
-        </span>
-        {trackRaceCount != null && (
-          <p className="muted" style={{ margin: '0.35rem 0 0' }}>
-            {trackRaceCount} importerade lopp med resultat på {game.trackName} totalt (alla omgångar).
-          </p>
-        )}
-      </div>
-
-      <p className="muted">
-        <strong>Steg 1</strong> testar vikter mot <em>denna omgång</em>.{' '}
-        <strong>Steg 2</strong> simulerar samma vikter mot <em>hela banans historik</em> — oavsett
-        vilken V86/V85-omgång du importerat.
+      <p className="muted" style={{ marginTop: 0 }}>
+        {sessionLabel} · {game.trackName} · {game.legsWithResults} avdelningar med resultat
       </p>
-
-      <h3 className="breakdown-title">Steg 1 — denna omgång</h3>
 
       <div className="backtest-filters">
         <label className="backtest-field">
@@ -283,37 +239,55 @@ export default function GameSessionAnalyze({ game }: { game: GameSession }) {
 
       {game.legsWithResults < 3 && (
         <p className="muted backtest-warn" style={{ marginTop: '0.75rem' }}>
-          Få avdelningar med resultat — optimering kan ge overanpassade vikter. Använd främst som experiment.
+          Få avdelningar med resultat — optimering kan ge overanpassade vikter.
         </p>
       )}
 
       {error && <p className="error">{error}</p>}
 
+      {trackTesting && (
+        <p className="muted" style={{ marginTop: '1rem' }}>
+          Beräknar träffprocent på all historik på {game.trackName}…
+        </p>
+      )}
+
+      {trackHitResult && newWeights && game.atgTrackId != null && (
+        <TrackHitSummary
+          trackName={game.trackName}
+          goal={goal}
+          result={trackHitResult}
+          onSave={handleSaveTrackWeights}
+          saving={saving}
+          saveMessage={saveMessage}
+        />
+      )}
+
       {runResult && runResult.racesWithResult > 0 && (
         <div className="backtest-result" style={{ marginTop: '1rem' }}>
           <p className="muted">
-            Nuvarande vikter: {runResult.hits}/{runResult.racesWithResult} träffar
+            Nuvarande vikter på denna omgång: {runResult.hits}/{runResult.racesWithResult} träffar
             {runResult.hitRate != null ? ` (${runResult.hitRate}%)` : ''}
-            {runResult.hits === runResult.racesWithResult ? ' — alla rätt!' : ''}
           </p>
-          <ResultTable summary={runResult} />
+          <details style={{ marginTop: '0.75rem' }}>
+            <summary className="muted">Visa detalj per avdelning</summary>
+            <ResultTable summary={runResult} />
+          </details>
         </div>
       )}
 
       {optimizeResult && optimizeResult.racesWithResult > 0 && (
         <div style={{ marginTop: '1rem' }}>
+          <p className="muted">Träff på denna omgång med optimerade vikter:</p>
           <div className="backtest-compare">
             <CompareBox
-              label="Nuvarande vikter"
-              subtitle="Bara denna omgång"
+              label="Nuvarande"
               hits={optimizeResult.baseline.hits}
               total={optimizeResult.baseline.racesWithResult}
               hitRate={optimizeResult.baseline.hitRate}
             />
             <div className="backtest-compare-arrow">→</div>
             <CompareBox
-              label="Optimerade vikter"
-              subtitle="Bara denna omgång"
+              label="Nya vikter"
               hits={optimizeResult.optimized.hits}
               total={optimizeResult.optimized.racesWithResult}
               hitRate={optimizeResult.optimized.hitRate}
@@ -321,28 +295,16 @@ export default function GameSessionAnalyze({ game }: { game: GameSession }) {
             />
           </div>
 
-          {optimizeResult.message && (
-            <p
-              className={
-                optimizeResult.optimized.hits === optimizeResult.racesWithResult
-                  ? 'hit-win'
-                  : 'muted'
-              }
-              style={{ marginTop: '0.75rem' }}
-            >
-              {optimizeResult.message}
-            </p>
-          )}
-
           {optimizeResult.improved && (
-            <div className="backtest-suggested" style={{ marginTop: '0.75rem' }}>
-              <h3 className="breakdown-title">Föreslagna vikter (denna omgång)</h3>
-              <ul className="backtest-weight-list">
+            <details style={{ marginTop: '0.75rem' }}>
+              <summary className="muted">Visa ändrade vikter</summary>
+              <ul className="backtest-weight-list" style={{ marginTop: '0.5rem' }}>
                 {optimizeResult.optimized.weights.map((p) => {
                   const prev = optimizeResult.baseline.weights.find((b) => b.id === p.id);
                   const changed = prev && prev.weight !== p.weight;
+                  if (!changed) return null;
                   return (
-                    <li key={p.id} className={changed ? 'backtest-weight-changed' : undefined}>
+                    <li key={p.id} className="backtest-weight-changed">
                       <span>{p.name}</span>
                       <span>
                         {formatWeightValue(prev?.weight ?? 0)} →{' '}
@@ -352,81 +314,19 @@ export default function GameSessionAnalyze({ game }: { game: GameSession }) {
                   );
                 })}
               </ul>
-            </div>
+            </details>
           )}
+
+          <details style={{ marginTop: '0.75rem' }}>
+            <summary className="muted">Visa detalj per avdelning</summary>
+            <p className="muted">Nuvarande vikter</p>
+            <ResultTable summary={optimizeResult.baseline} />
+            <p className="muted" style={{ marginTop: '1rem' }}>
+              Nya vikter
+            </p>
+            <ResultTable summary={optimizeResult.optimized} />
+          </details>
         </div>
-      )}
-
-      {game.atgTrackId != null && weightsForTrackTest && (
-        <div style={{ marginTop: '1.5rem' }}>
-          <h3 className="breakdown-title">Steg 2 — all historik på {game.trackName}</h3>
-          <p className="muted" style={{ marginTop: 0 }}>
-            Simulerar vikterna från <strong>{sessionLabel}</strong> mot alla importerade lopp på{' '}
-            {game.trackName}. Öppna en annan omgång på banan om du vill testa med den istället.
-          </p>
-          <div className="backtest-actions">
-            <button
-              type="button"
-              onClick={() =>
-                handleTestOnTrack(
-                  weightsForTrackTest,
-                  baselineForTrackCompare ?? undefined,
-                )
-              }
-              disabled={trackTesting || running || optimizing}
-            >
-              {trackTesting ? 'Testar mot banan…' : trackTestLabel}
-            </button>
-          </div>
-
-          {(trackSessionResult || trackBaselineResult) && (
-            <div ref={trackResultRef} style={{ marginTop: '1rem' }}>
-              {trackSessionResult ? (
-                <TrackWideResultPanel
-                  trackName={game.trackName}
-                  goal={goal}
-                  baseline={trackBaselineResult}
-                  session={trackSessionResult}
-                  sessionWeightsLabel={
-                    optimizeResult ? 'Optimerade vikter (denna omgång)' : 'Nuvarande vikter'
-                  }
-                />
-              ) : trackBaselineResult ? (
-                <TrackWideResultPanel
-                  trackName={game.trackName}
-                  goal={goal}
-                  baseline={null}
-                  session={trackBaselineResult}
-                  sessionWeightsLabel="Nuvarande vikter"
-                />
-              ) : null}
-              <p className="muted" style={{ marginTop: '0.75rem', marginBottom: 0 }}>
-                Nöjd med vikterna?{' '}
-                <Link to={settingsLink}>Spara som banprofil i Inställningar</Link>.
-              </p>
-            </div>
-          )}
-        </div>
-      )}
-
-      {(runResult || optimizeResult) && (
-        <>
-          <h3 className="breakdown-title" style={{ marginTop: '1.5rem' }}>
-            Detalj per avdelning — {sessionLabel}
-          </h3>
-          {optimizeResult ? (
-            <>
-              <p className="muted">Nuvarande vikter</p>
-              <ResultTable summary={optimizeResult.baseline} />
-              <p className="muted" style={{ marginTop: '1rem' }}>
-                Optimerade vikter
-              </p>
-              <ResultTable summary={optimizeResult.optimized} />
-            </>
-          ) : runResult ? (
-            <ResultTable summary={runResult} />
-          ) : null}
-        </>
       )}
     </div>
   );

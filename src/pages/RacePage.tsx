@@ -35,6 +35,9 @@ import {
 } from '../../shared/format';
 import type { GameSessionLeg, Parameter, RaceEntry, RaceSession } from '../../shared/types';
 import { VARMNING_PARAMETER_ID, VARMNING_SCORES } from '../../shared/types';
+import LegPrepComment, { legPrepInputFromSession } from '../components/LegPrepComment';
+import LegSpikeHint from '../components/LegSpikeHint';
+import { classifyRaceProfile } from '../../shared/raceProfile';
 
 function formatKr(n: number | null) {
   if (n == null) return '—';
@@ -167,6 +170,7 @@ export default function RacePage() {
     topEntry.actualPosition <= 3;
 
   const legIndex = siblingLegs?.findIndex((leg) => leg.id === session.id) ?? -1;
+  const currentLeg = legIndex >= 0 ? siblingLegs![legIndex] : null;
   const prevLeg = legIndex > 0 ? siblingLegs![legIndex - 1] : null;
   const nextLeg =
     siblingLegs && legIndex >= 0 && legIndex < siblingLegs.length - 1
@@ -368,6 +372,12 @@ export default function RacePage() {
 
   const activeProfileLabel = scoringProfileLabel(session);
   const settingsHref = settingsLinkForSession(session);
+  const raceProfile = classifyRaceProfile(
+    session.raceName,
+    session.raceTerms,
+    session.distance,
+    session.startMethod,
+  );
 
   return (
     <>
@@ -399,6 +409,34 @@ export default function RacePage() {
           </p>
         )}
       </div>
+
+      {session.atgTrackId != null && (
+        <div className="card">
+          <h2>Gardering inför lopp</h2>
+          {session.raceName && <p className="leg-race-name" style={{ marginTop: 0 }}>{session.raceName}</p>}
+          <p className="muted" style={{ marginTop: session.raceName ? '0.35rem' : 0 }}>
+            {raceProfile.summary}
+          </p>
+          {session.raceTerms.length > 0 && (
+            <ul className="leg-race-terms">
+              {session.raceTerms.map((term) => (
+                <li key={term}>{term}</li>
+              ))}
+            </ul>
+          )}
+          <LegPrepComment
+            atgTrackId={session.atgTrackId}
+            gameType={session.gameType}
+            leg={legPrepInputFromSession({ ...session, entries: session.entries }, currentLeg)}
+            label=""
+          />
+          <LegSpikeHint
+            atgTrackId={session.atgTrackId}
+            gameType={session.gameType}
+            leg={legPrepInputFromSession({ ...session, entries: session.entries }, currentLeg)}
+          />
+        </div>
+      )}
 
       <div className="card">
         <h2>Trot Score — sorterat</h2>

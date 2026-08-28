@@ -39,6 +39,9 @@ import { formatStartMethodLabel } from '../../shared/scoring';
 import { MIN_SPIKE_MARGIN, MIN_SPIKE_TOP_SCORE } from '../../shared/spikeSuggestions';
 import RankingExportPanel from '../components/RankingExportPanel';
 import GameSessionAnalyze from '../components/GameSessionAnalyze';
+import TrackPrepBrief, { useTrackPrepAnalysis } from '../components/TrackPrepBrief';
+import LegPrepComment from '../components/LegPrepComment';
+import LegSpikeHint from '../components/LegSpikeHint';
 
 
 
@@ -143,6 +146,8 @@ function LegRaceInfo({ leg }: { leg: GameSessionLeg }) {
   return (
 
     <div className="leg-race-info">
+
+      {leg.trackName && <p className="muted leg-race-track">{leg.trackName}</p>}
 
       {info.name && <p className="leg-race-name">{info.name}</p>}
 
@@ -273,6 +278,21 @@ export default function GamePage() {
 
 
   const missingRaceInfo = game?.legs.some((leg) => !leg.raceInfo?.name) ?? false;
+
+  const uniqueLegTracks = game
+    ? [...new Map(
+        game.legs
+          .filter((leg): leg is typeof leg & { atgTrackId: number; trackName: string } =>
+            leg.atgTrackId != null && leg.trackName != null,
+          )
+          .map((leg) => [leg.atgTrackId, { atgTrackId: leg.atgTrackId, trackName: leg.trackName }]),
+      ).values()]
+    : [];
+
+  const trackPrep = useTrackPrepAnalysis(
+    !game?.isMultiTrack ? game?.atgTrackId : null,
+    game?.gameType,
+  );
 
 
 
@@ -469,6 +489,35 @@ export default function GamePage() {
         )}
 
       </div>
+
+
+
+      {(game.isMultiTrack ? uniqueLegTracks.length > 0 : game.atgTrackId != null) && (
+        <div className="card">
+          <h2>Bananalys inför spel</h2>
+          {game.isMultiTrack ? (
+            uniqueLegTracks.map((track) => (
+              <div key={track.atgTrackId} className="multi-track-brief">
+                <h3>{track.trackName}</h3>
+                <TrackPrepBrief
+                  atgTrackId={track.atgTrackId}
+                  trackName={track.trackName}
+                  gameType={game.gameType}
+                  compact
+                />
+              </div>
+            ))
+          ) : (
+            <TrackPrepBrief
+              atgTrackId={game.atgTrackId}
+              trackName={game.trackName}
+              gameType={game.gameType}
+              analysis={trackPrep.analysis}
+              compact
+            />
+          )}
+        </div>
+      )}
 
 
 
@@ -788,6 +837,10 @@ export default function GamePage() {
 
                       <strong>Avd {leg.legNumber}</strong>
 
+                      {leg.trackName && (
+                        <span className="badge badge-track">{leg.trackName}</span>
+                      )}
+
                       {formatTrackRaceLabel(leg.trackRaceNumber) && (
 
                         <span className="muted"> · {formatTrackRaceLabel(leg.trackRaceNumber)}</span>
@@ -822,7 +875,17 @@ export default function GamePage() {
 
                   <LegSystemHint leg={leg} />
 
+                  {leg.atgTrackId != null && (
+                    <LegPrepComment
+                      atgTrackId={leg.atgTrackId}
+                      gameType={game.gameType}
+                      leg={leg}
+                    />
+                  )}
 
+                  {leg.atgTrackId != null && (
+                    <LegSpikeHint atgTrackId={leg.atgTrackId} gameType={game.gameType} leg={leg} />
+                  )}
 
                   <div className="game-leg-score-row">
 

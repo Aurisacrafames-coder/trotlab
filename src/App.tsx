@@ -8,6 +8,7 @@ import HomePage from './pages/HomePage';
 import SystemPage from './pages/SystemPage';
 import ComparePage from './pages/ComparePage';
 import StatsVerifyPage from './pages/StatsVerifyPage';
+import TrackPrepPage from './pages/TrackPrepPage';
 
 export default function App() {
   return (
@@ -24,6 +25,7 @@ export default function App() {
             Spel
           </NavLink>
           <NavLink to="/import">Importera</NavLink>
+          <NavLink to="/forbered">Inför spel</NavLink>
           <NavLink to="/statistik">Statistik</NavLink>
           <NavLink to="/jämför">Jämför</NavLink>
           <NavLink to="/installningar">Inställningar</NavLink>
@@ -35,6 +37,7 @@ export default function App() {
         <Route path="/omgang/:id" element={<GamePage />} />
         <Route path="/omgang/:id/system" element={<SystemPage />} />
         <Route path="/lopp/:id" element={<RacePage />} />
+        <Route path="/forbered" element={<TrackPrepPage />} />
         <Route path="/statistik" element={<StatsPage />} />
         <Route path="/statistik/kusk-tranare" element={<StatsVerifyPage />} />
         <Route path="/jämför" element={<ComparePage />} />

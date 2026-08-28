@@ -13,13 +13,25 @@ export function findOrCreateGameSession(
     gameType: string;
     date: string;
     trackName: string;
-    atgTrackId: number;
+    atgTrackId: number | null;
+    venueSlug?: string | null;
+    atgGameId?: string | null;
   },
 ): number {
+  if (data.venueSlug) {
+    const byVenue = db
+      .prepare(
+        `SELECT id FROM game_sessions
+         WHERE game_type = ? AND date = ? AND venue_slug = ?`,
+      )
+      .get(data.gameType, data.date, data.venueSlug) as { id: number } | undefined;
+    if (byVenue) return byVenue.id;
+  }
+
   const existing = db
     .prepare(
       `SELECT id FROM game_sessions
-       WHERE game_type = ? AND date = ? AND atg_track_id = ?`,
+       WHERE game_type = ? AND date = ? AND atg_track_id IS ? AND venue_slug IS NULL`,
     )
     .get(data.gameType, data.date, data.atgTrackId) as { id: number } | undefined;
 
@@ -27,10 +39,17 @@ export function findOrCreateGameSession(
 
   const result = db
     .prepare(
-      `INSERT INTO game_sessions (game_type, date, track_name, atg_track_id)
-       VALUES (?, ?, ?, ?)`,
+      `INSERT INTO game_sessions (game_type, date, track_name, atg_track_id, venue_slug, atg_game_id)
+       VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .run(data.gameType, data.date, data.trackName, data.atgTrackId);
+    .run(
+      data.gameType,
+      data.date,
+      data.trackName,
+      data.atgTrackId,
+      data.venueSlug ?? null,
+      data.atgGameId ?? null,
+    );
 
   return Number(result.lastInsertRowid);
 }
@@ -147,7 +166,8 @@ function winnerRankInScoring(
 function loadLegSummary(db: Database.Database, sessionId: number): GameSessionLeg {
   const session = db
     .prepare(
-      `SELECT id, leg_number as legNumber, track_race_number as trackRaceNumber, distance,
+      `SELECT id, leg_number as legNumber, track_race_number as trackRaceNumber,
+              track_name as trackName, atg_track_id as atgTrackId, distance,
               start_method as startMethod, status, race_name as raceName, race_prize as racePrize,
               race_terms as raceTerms, scheduled_start_time as scheduledStartTime
        FROM race_sessions WHERE id = ?`,
@@ -156,6 +176,8 @@ function loadLegSummary(db: Database.Database, sessionId: number): GameSessionLe
     id: number;
     legNumber: number;
     trackRaceNumber: number | null;
+    trackName: string | null;
+    atgTrackId: number | null;
     distance: number | null;
     startMethod: string | null;
     status: string | null;
@@ -171,7 +193,8 @@ function loadLegSummary(db: Database.Database, sessionId: number): GameSessionLe
   const entries = db
     .prepare(
       `SELECT start_number as startNumber, horse_name as horseName, atg_horse_id as atgHorseId,
-              trot_score as trotScore, actual_position as actualPosition,
+              trot_score as trotScore, bet_distribution_pct as betDistributionPct,
+              actual_position as actualPosition,
               start_points as startPoints, earnings_per_start as earningsPerStart,
               horse_sex as horseSex, career_starts as careerStarts,
               driver_apprentice as driverApprentice, scratched
@@ -182,6 +205,7 @@ function loadLegSummary(db: Database.Database, sessionId: number): GameSessionLe
     horseName: string;
     atgHorseId: number;
     trotScore: number | null;
+    betDistributionPct: number | null;
     actualPosition: number | null;
     startPoints: number | null;
     earningsPerStart: number | null;
@@ -243,6 +267,8 @@ function loadLegSummary(db: Database.Database, sessionId: number): GameSessionLe
     id: session.id,
     legNumber: session.legNumber,
     trackRaceNumber: session.trackRaceNumber,
+    trackName: session.trackName,
+    atgTrackId: session.atgTrackId,
     distance: session.distance,
     startMethod: session.startMethod,
     status: session.status,
@@ -252,6 +278,7 @@ function loadLegSummary(db: Database.Database, sessionId: number): GameSessionLe
       startNumber: e.startNumber,
       horseName: e.horseName,
       trotScore: e.trotScore!,
+      betDistributionPct: e.betDistributionPct,
       isWatched: watchedHorseIds.has(e.atgHorseId),
       scratched: e.scratched === 1,
     })),
@@ -279,8 +306,8 @@ export function loadGameSession(db: Database.Database, id: number): GameSession 
   const game = db
     .prepare(
       `SELECT id, game_type as gameType, date, track_name as trackName,
-              atg_track_id as atgTrackId, tip_submitted_at as tipSubmittedAt,
-              uses_tip_parameters as usesTipParameters
+              atg_track_id as atgTrackId, venue_slug as venueSlug, atg_game_id as atgGameId,
+              tip_submitted_at as tipSubmittedAt, uses_tip_parameters as usesTipParameters
        FROM game_sessions WHERE id = ?`,
     )
     .get(id) as
@@ -290,6 +317,8 @@ export function loadGameSession(db: Database.Database, id: number): GameSession 
         date: string;
         trackName: string;
         atgTrackId: number | null;
+        venueSlug: string | null;
+        atgGameId: string | null;
         tipSubmittedAt: string | null;
         usesTipParameters: number;
       }
@@ -339,6 +368,9 @@ export function loadGameSession(db: Database.Database, id: number): GameSession 
     date: game.date,
     trackName: game.trackName,
     atgTrackId: game.atgTrackId,
+    venueSlug: game.venueSlug,
+    atgGameId: game.atgGameId,
+    isMultiTrack: new Set(legs.map((leg) => leg.atgTrackId).filter((id): id is number => id != null)).size > 1,
     tipSubmittedAt: game.tipSubmittedAt,
     usesTipParameters: game.usesTipParameters === 1,
     tipParameters: tipParams.length > 0 ? tipParams : null,

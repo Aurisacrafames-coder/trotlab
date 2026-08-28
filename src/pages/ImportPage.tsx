@@ -2,9 +2,11 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   fetchBulkImportStatus,
+  fetchImportProgress,
   fetchKnownTracks,
   importRace,
   startBulkImport,
+  type ImportProgress,
 } from '../api';
 import type { BulkImportStatus, KnownTrack, RaceSession } from '../../shared/types';
 import { BULK_IMPORT_LOOKBACK_MONTHS } from '../../shared/types';
@@ -12,7 +14,7 @@ import type { ImportGameResult } from '../api';
 
 function isGameDivisionUrl(url: string): boolean {
   const trimmed = url.trim();
-  if (!trimmed || /\/vinnare\//i.test(trimmed)) return false;
+  if (!trimmed || /\/(vinnare|vp|plats)\//i.test(trimmed)) return false;
   return /\/avd\/\d+/i.test(trimmed) || /\/spel\/[^/]+\/\d{4}-\d{2}-\d{2}\/[^/]+\/avd\//i.test(trimmed);
 }
 
@@ -20,6 +22,7 @@ export default function ImportPage() {
   const [url, setUrl] = useState('');
   const [importAllLegs, setImportAllLegs] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [importProgress, setImportProgress] = useState<ImportProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tracks, setTracks] = useState<KnownTrack[]>([]);
   const [bulkTrackId, setBulkTrackId] = useState<number | ''>('');
@@ -60,8 +63,21 @@ export default function ImportPage() {
     if (!url.trim()) return;
     setLoading(true);
     setError(null);
+    setImportProgress(null);
+
+    const importAll = gameDivisionUrl && importAllLegs;
+    const progressTimer = importAll
+      ? window.setInterval(async () => {
+          try {
+            const progress = await fetchImportProgress();
+            if (progress) setImportProgress(progress);
+          } catch {
+            // ignore polling errors
+          }
+        }, 1000)
+      : null;
+
     try {
-      const importAll = gameDivisionUrl && importAllLegs;
       if (importAll) {
         const result = await importRace(url.trim(), true) as ImportGameResult;
         if (result.errors.length > 0) {
@@ -82,6 +98,8 @@ export default function ImportPage() {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Import misslyckades');
     } finally {
+      if (progressTimer != null) window.clearInterval(progressTimer);
+      setImportProgress(null);
       setLoading(false);
     }
   }
@@ -184,7 +202,8 @@ export default function ImportPage() {
         <p className="muted" style={{ marginTop: 0 }}>
           Klistra in en länk till en avdelning (V86, V85, GS75, V64 …) eller ett enstaka lopp
           (vinnarspelet), t.ex.{' '}
-          <code>/spel/2026-07-27/vinnare/ostersund/lopp/2</code>.
+          <code>/spel/2026-07-27/vinnare/ostersund/lopp/2</code> eller{' '}
+          <code>/spel/2026-08-28/vp/bergsaker/lopp/2</code>.
           För spelomgångar kan du importera alla avdelningar på en gång.
         </p>
         {gameDivisionUrl && (
@@ -217,6 +236,20 @@ export default function ImportPage() {
                 : 'Importera'}
           </button>
         </div>
+        {loading && importProgress && (
+          <p className="muted" style={{ marginTop: '0.75rem' }}>
+            {importProgress.phase}
+            {importProgress.totalLegs > 0 && (
+              <>
+                {' '}
+                ({Math.max(importProgress.importedLegs, importProgress.currentLeg)}/
+                {importProgress.totalLegs})
+              </>
+            )}
+            <br />
+            Hela V86-omgången tar oftast 1–3 minuter — hämtar form och statistik per häst från ATG.
+          </p>
+        )}
         {error && <p className="error">{error}</p>}
       </div>
     </>

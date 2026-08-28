@@ -413,6 +413,18 @@ function migrateSchema(database: Database.Database) {
     );
   }
 
+  const gameCols = database
+    .prepare('PRAGMA table_info(game_sessions)')
+    .all() as Array<{ name: string }>;
+  const gameColNames = new Set(gameCols.map((c) => c.name));
+  if (!gameColNames.has('venue_slug')) {
+    database.exec(`ALTER TABLE game_sessions ADD COLUMN venue_slug TEXT`);
+  }
+  if (!gameColNames.has('atg_game_id')) {
+    database.exec(`ALTER TABLE game_sessions ADD COLUMN atg_game_id TEXT`);
+  }
+  database.exec(`CREATE INDEX IF NOT EXISTS idx_game_sessions_venue ON game_sessions(game_type, date, venue_slug)`);
+
   seedNewParameters(database);
   backfillGameSessions(database);
   migrateTrackPostStats(database);

@@ -96,6 +96,8 @@ export interface GameSessionLeg {
   id: number;
   legNumber: number;
   trackRaceNumber: number | null;
+  trackName: string | null;
+  atgTrackId: number | null;
   distance: number | null;
   startMethod: string | null;
   status: string | null;
@@ -105,6 +107,7 @@ export interface GameSessionLeg {
     startNumber: number;
     horseName: string;
     trotScore: number;
+    betDistributionPct: number | null;
     isWatched?: boolean;
     scratched?: boolean;
   }>;
@@ -144,6 +147,9 @@ export interface GameSession {
   date: string;
   trackName: string;
   atgTrackId: number | null;
+  venueSlug: string | null;
+  atgGameId: string | null;
+  isMultiTrack: boolean;
   tipSubmittedAt: string | null;
   usesTipParameters: boolean;
   tipParameters: Parameter[] | null;
@@ -251,6 +257,100 @@ export interface BacktestOptimizeResult {
   message: string | null;
   trialsRun: number;
   maxTrials: number;
+}
+
+export interface MissAnalysisBucket {
+  label: string;
+  hits: number;
+  misses: number;
+  total: number;
+  hitRate: number | null;
+}
+
+export interface MissAnalysisRace extends BacktestRaceDetail {
+  distance: number | null;
+  fieldSize: number;
+  winnerName: string | null;
+  winnerStartNumber: number | null;
+}
+
+export interface GameTypeProfile {
+  gameType: string;
+  hits: number;
+  misses: number;
+  total: number;
+  hitRate: number | null;
+  byStartMethod: MissAnalysisBucket[];
+  byDistance: MissAnalysisBucket[];
+  byWinnerRank: MissAnalysisBucket[];
+}
+
+export interface TopPickWinBucket {
+  label: string;
+  topWins: number;
+  total: number;
+  topWinRate: number | null;
+}
+
+export interface GameTypeTopPickWinProfile {
+  gameType: string;
+  topWins: number;
+  total: number;
+  topWinRate: number | null;
+  byStartMethod: TopPickWinBucket[];
+  byDistance: TopPickWinBucket[];
+  byMarginBand: TopPickWinBucket[];
+  byFieldSize: TopPickWinBucket[];
+  byRaceCategory: TopPickWinBucket[];
+}
+
+export interface TopPickWinAnalysis {
+  topWins: number;
+  total: number;
+  topWinRate: number | null;
+  byStartMethod: TopPickWinBucket[];
+  byDistance: TopPickWinBucket[];
+  byMarginBand: TopPickWinBucket[];
+  byFieldSize: TopPickWinBucket[];
+  byRaceCategory: TopPickWinBucket[];
+  gameTypeProfiles: GameTypeTopPickWinProfile[];
+}
+
+export type SpikeEttaLabel = 'Stark spik' | 'Spik-kandidat' | 'Tveksam' | 'Gardera';
+
+export interface LegSpikeRecommendation {
+  label: SpikeEttaLabel;
+  summary: string;
+  reasons: string[];
+  margin12: number | null;
+  historicalRates: string[];
+}
+
+export interface TrackMissAnalysis {
+  atgTrackId: number;
+  trackName: string;
+  goal: BacktestGoal;
+  racesWithResult: number;
+  upcomingRaceCount: number;
+  hits: number;
+  misses: number;
+  hitRate: number | null;
+  usesTrackProfile: boolean;
+  byStartMethod: MissAnalysisBucket[];
+  byDistance: MissAnalysisBucket[];
+  byGameType: MissAnalysisBucket[];
+  byWinnerRank: MissAnalysisBucket[];
+  /** Lopptyp från villkor/namn (stolopp, klass, ålder m.m.). */
+  byRaceCategory: MissAnalysisBucket[];
+  gameTypeProfiles: GameTypeProfile[];
+  /** Andel lopp där ettan i Trot Score vann (per banprofil). */
+  topPickWin: TopPickWinAnalysis;
+  missRaces: MissAnalysisRace[];
+  insights: string[];
+  suggestedWeights: Parameter[] | null;
+  suggestedHitRate: number | null;
+  suggestedHits: number | null;
+  suggestedHitsGained: number | null;
 }
 
 /** Default number of weight combinations to try during optimization. */

@@ -20,6 +20,8 @@ import { startStatsSyncJob } from './jobs/syncStats.js';
 import { getAutoOptimizerStatus, scheduleAutoOptimize, startAutoOptimizeJob } from './jobs/autoOptimize.js';
 import { startEarningsRefreshJob } from './jobs/refreshEarnings.js';
 import { listBacktestTracks, normalizeMaxTrials, optimizeWeights, runBacktest } from './backtest.js';
+import { analyzeTrackMisses } from './trackMissAnalysis.js';
+import { buildGameRankingExport } from './rankingExportService.js';
 import { refreshAllGameSessionRaceInfo } from './raceInfoRefresh.js';
 import { saveUserSystem, validateUserSystemLegs } from './userSystem.js';
 import {
@@ -54,6 +56,7 @@ import {
 } from './statsVerification.js';
 import { accessGate } from './auth.js';
 import { importAllGameLegsFromUrl, persistImportedRace } from './importService.js';
+import { getImportProgress } from './importProgress.js';
 import { startTrainerBackfillJob } from './trainerRefresh.js';
 import type { BacktestGoal, Parameter, RaceEntry, RaceSession } from '../shared/types.js';
 import { DEFAULT_BACKTEST_GOAL } from '../shared/types.js';
@@ -226,6 +229,10 @@ app.put('/api/parameters', (req, res) => {
   for (const s of sessions) recalculateSessionScores(s.id);
 
   res.json(getParameters());
+});
+
+app.get('/api/import/status', (_req, res) => {
+  res.json(getImportProgress());
 });
 
 app.post('/api/import', async (req, res) => {
@@ -559,6 +566,21 @@ app.get('/api/game-sessions/:id', (req, res) => {
   const game = loadGameSession(getDb(), parseInt(req.params.id, 10));
   if (!game) return res.status(404).json({ error: 'Omgång hittades inte' });
   res.json(game);
+});
+
+app.get('/api/game-sessions/:id/ranking-export', async (req, res) => {
+  const gameSessionId = parseInt(req.params.id, 10);
+  if (Number.isNaN(gameSessionId)) {
+    return res.status(400).json({ error: 'Ogiltigt omgångs-id' });
+  }
+  try {
+    const payload = await buildGameRankingExport(getDb(), gameSessionId);
+    if (!payload) return res.status(404).json({ error: 'Omgång hittades inte' });
+    res.json(payload);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Kunde inte skapa ranking-export';
+    res.status(500).json({ error: message });
+  }
 });
 
 app.put('/api/game-sessions/:id/user-system', (req, res) => {
@@ -926,6 +948,19 @@ app.delete('/api/watchlist/:atgHorseId', (req, res) => {
 
 app.get('/api/backtest/tracks', (_req, res) => {
   res.json(listBacktestTracks(getDb()));
+});
+
+app.post('/api/backtest/miss-analysis', (req, res) => {
+  const { atgTrackId, goal } = req.body as { atgTrackId?: number; goal?: BacktestGoal };
+
+  if (atgTrackId == null) {
+    return res.status(400).json({ error: 'atgTrackId krävs' });
+  }
+  if (goal !== 'win' && goal !== 'top3') {
+    return res.status(400).json({ error: 'goal måste vara win eller top3' });
+  }
+
+  res.json(analyzeTrackMisses(getDb(), atgTrackId, goal));
 });
 
 app.post('/api/backtest/run', (req, res) => {

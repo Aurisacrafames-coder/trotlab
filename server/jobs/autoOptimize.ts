@@ -135,8 +135,14 @@ function loadStoredResult(db: Database.Database, atgTrackId?: number | null): Ba
     return null;
   }
 
-  const legacy = loadLegacyResult(db);
-  return legacy;
+  return loadLegacyResult(db);
+}
+
+export function getStoredOptimizeResult(
+  db: Database.Database,
+  atgTrackId: number,
+): BacktestOptimizeResult | null {
+  return loadStoredResult(db, atgTrackId);
 }
 
 function idleStatus(

@@ -1,69 +1,35 @@
 import type { ParsedAtgUrl } from '../shared/types.js';
+import { parseVenueSlug, venueMatchesGameTracks, type GameVenue } from '../shared/gameVenue.js';
+import {
+  formatKmTimeForStorage,
+  detectFormRecordTime,
+  resolveActualPlacement,
+  resolveFormPlace,
+  type VolteRow,
+} from '../shared/format.js';
 import { normalizeStartMethod } from '../shared/scoring.js';
-import { formatKmTimeLabel, formatKmTimeForStorage, detectFormRecordTime, resolveActualPlacement, resolveFormPlace, type VolteRow } from '../shared/format.js';
-
-const ATG_BASE = 'https://www.atg.se/services/racinginfo/v1/api';
-
-export const TRACK_SLUGS: Record<string, number> = {
-  solvalla: 5,
-  jagersro: 7,
-  axevalla: 8,
-  bergsaker: 9,
-  dannero: 13,
-  eskilstuna: 14,
-  farjestad: 15,
-  gavle: 16,
-  halmstad: 17,
-  kalmar: 18,
-  lindesberg: 21,
-  mantorp: 22,
-  romme: 23,
-  raby: 24,
-  skelleftea: 25,
-  visby: 28,
-  tingsryd: 46,
-  amal: 29,
-  arjang: 31,
-  orebro: 32,
-  ostersund: 33,
-  ovrevoll: 83,
-  nykobing: 54,
-  'goteborg-galopp': 45,
-  'goteborg-trav': 47,
-};
-
-const TRACK_DISPLAY_NAMES: Record<string, string> = {
-  solvalla: 'Solvalla',
-  jagersro: 'Jägersro',
-  axevalla: 'Axevalla',
-  bergsaker: 'Bergsåker',
-  dannero: 'Dannero',
-  eskilstuna: 'Eskilstuna',
-  farjestad: 'Färjestad',
-  gavle: 'Gävle',
-  halmstad: 'Halmstad',
-  kalmar: 'Kalmar',
-  lindesberg: 'Lindesberg',
-  mantorp: 'Mantorp',
-  romme: 'Romme',
-  raby: 'Rättvik',
-  skelleftea: 'Skellefteå',
-  visby: 'Visby',
-  tingsryd: 'Tingsryd',
-  amal: 'Åmål',
-  arjang: 'Arjang',
-  orebro: 'Örebro',
-  ostersund: 'Östersund',
-  ovrevoll: 'Ovrevoll',
-  nykobing: 'Nyköping',
-  'goteborg-galopp': 'Göteborg Galopp',
-  'goteborg-trav': 'Göteborg Trav',
-};
+import {
+  getTrackSlugById,
+  knownTrackNameById,
+  TRACK_DISPLAY_NAMES,
+  TRACK_SLUGS,
+} from '../shared/tracks.js';
 
 export interface KnownTrack {
   atgTrackId: number;
   slug: string;
   name: string;
+}
+
+export { TRACK_SLUGS, TRACK_DISPLAY_NAMES, getTrackSlugById, knownTrackNameById };
+
+const ATG_BASE = 'https://www.atg.se/services/racinginfo/v1/api';
+
+/** ATG URL segments for single-race pages (vinnare, vinnare/plats, plats). */
+const SINGLE_RACE_URL_PRODUCTS = new Set(['vinnare', 'vp', 'plats']);
+
+function isSingleRaceUrlProduct(product: string | undefined): boolean {
+  return SINGLE_RACE_URL_PRODUCTS.has(product?.toLowerCase() ?? '');
 }
 
 export function listKnownTracks(): KnownTrack[] {
@@ -74,19 +40,6 @@ export function listKnownTracks(): KnownTrack[] {
       name: TRACK_DISPLAY_NAMES[slug] ?? slug,
     }))
     .sort((a, b) => a.name.localeCompare(b.name, 'sv'));
-}
-
-export function getTrackSlugById(atgTrackId: number): string | null {
-  for (const [slug, id] of Object.entries(TRACK_SLUGS)) {
-    if (id === atgTrackId) return slug;
-  }
-  return null;
-}
-
-export function knownTrackNameById(atgTrackId: number): string | null {
-  const slug = getTrackSlugById(atgTrackId);
-  if (!slug) return null;
-  return TRACK_DISPLAY_NAMES[slug] ?? slug;
 }
 
 export function parseAtgUrl(url: string): (ParsedAtgUrl & { raceId?: string }) | null {
@@ -127,7 +80,7 @@ export function parseAtgUrl(url: string): (ParsedAtgUrl & { raceId?: string }) |
       }
     }
 
-    // /spel/2026-07-27/vinnare/ostersund/lopp/2
+    // /spel/2026-07-27/vinnare/ostersund/lopp/2  (also /vp/ and /plats/)
     if (spelIdx >= 0 && parts.length >= spelIdx + 6) {
       const datePattern = /^\d{4}-\d{2}-\d{2}$/;
       const date = parts[spelIdx + 1];
@@ -136,7 +89,7 @@ export function parseAtgUrl(url: string): (ParsedAtgUrl & { raceId?: string }) |
       const loppMarker = parts[spelIdx + 4]?.toLowerCase();
       const raceNumber = parseInt(parts[spelIdx + 5], 10);
       if (
-        product === 'vinnare' &&
+        isSingleRaceUrlProduct(product) &&
         loppMarker === 'lopp' &&
         datePattern.test(date) &&
         trackSlug &&
@@ -209,21 +162,52 @@ async function resolveVinnareRaceId(parsed: ParsedAtgUrl): Promise<string> {
   const race = track?.races?.find((r) => r.number === parsed.leg);
   if (race?.id) return race.id;
 
-  const vinnareGames =
-    calendar.games.vinnare ??
-    calendar.games.Vinnare ??
-    calendar.games.VINNARE ??
-    [];
+  const vinnareGames = [
+    ...(calendar.games.vinnare ??
+      calendar.games.Vinnare ??
+      calendar.games.VINNARE ??
+      []),
+    ...(calendar.games.vp ?? calendar.games.VP ?? []),
+    ...(calendar.games.plats ?? calendar.games.PLATS ?? []),
+  ];
   const game = vinnareGames.find((g) => g.races?.includes(expectedRaceId));
   if (game?.races?.[0]) return game.races[0];
 
   return expectedRaceId;
 }
 
-export async function resolveRaceId(parsed: ParsedAtgUrl & { raceId?: string }): Promise<string> {
-  if (parsed.raceId) return parsed.raceId;
-  if (parsed.gameType === 'VINNARE') return resolveVinnareRaceId(parsed);
+interface CalendarGame {
+  id: string;
+  races: string[];
+  tracks?: number[];
+}
 
+export function findCalendarGameForVenue(
+  games: CalendarGame[],
+  venue: GameVenue,
+): CalendarGame | undefined {
+  const byTracks = games.find((game) => venueMatchesGameTracks(venue, game.tracks));
+  if (byTracks) return byTracks;
+
+  if (!venue.isMultiTrack) {
+    const trackId = venue.trackIds[0];
+    return games.find((game) => game.id.includes(`_${trackId}_`));
+  }
+
+  return undefined;
+}
+
+export async function resolveCalendarGameFromUrl(sourceUrl: string): Promise<{
+  parsed: ParsedAtgUrl;
+  venue: GameVenue;
+  game: CalendarGame;
+}> {
+  const parsed = parseAtgUrl(sourceUrl.trim());
+  if (!parsed || parsed.gameType === 'VINNARE' || parsed.gameType === 'UNKNOWN') {
+    throw new Error('Ogiltig spel-länk för hel omgång.');
+  }
+
+  const venue = parseVenueSlug(parsed.trackSlug);
   const calendar = await atgFetch<CalendarDay>(`/calendar/day/${parsed.date}`);
   const keyLower = parsed.gameType.toLowerCase();
   const games =
@@ -232,16 +216,39 @@ export async function resolveRaceId(parsed: ParsedAtgUrl & { raceId?: string }):
     calendar.games[keyLower.toUpperCase()] ??
     [];
 
-  const trackId = TRACK_SLUGS[parsed.trackSlug.toLowerCase()];
+  const normalizedGames = (Array.isArray(games) ? games : [games]).filter(Boolean) as CalendarGame[];
+  const game = findCalendarGameForVenue(normalizedGames, venue);
+  if (!game?.races.length) {
+    throw new Error(
+      `Kunde inte hitta ${parsed.gameType} på ${parsed.date} (${venue.displayName}). Kontrollera länken.`,
+    );
+  }
 
-  for (const game of games) {
-    if (trackId && !game.id.includes(`_${trackId}_`)) continue;
+  return { parsed, venue, game };
+}
+
+export async function resolveRaceId(parsed: ParsedAtgUrl & { raceId?: string }): Promise<string> {
+  if (parsed.raceId) return parsed.raceId;
+  if (parsed.gameType === 'VINNARE') return resolveVinnareRaceId(parsed);
+
+  const venue = parseVenueSlug(parsed.trackSlug);
+  const calendar = await atgFetch<CalendarDay>(`/calendar/day/${parsed.date}`);
+  const keyLower = parsed.gameType.toLowerCase();
+  const games =
+    calendar.games[parsed.gameType] ??
+    calendar.games[keyLower] ??
+    calendar.games[keyLower.toUpperCase()] ??
+    [];
+
+  const normalizedGames = (Array.isArray(games) ? games : [games]).filter(Boolean) as CalendarGame[];
+  const game = findCalendarGameForVenue(normalizedGames, venue);
+  if (game) {
     const raceId = game.races[parsed.leg - 1];
     if (raceId) return raceId;
   }
 
-  for (const game of games) {
-    const raceId = game.races[parsed.leg - 1];
+  for (const fallbackGame of normalizedGames) {
+    const raceId = fallbackGame.races[parsed.leg - 1];
     if (raceId) return raceId;
   }
 
@@ -326,11 +333,10 @@ interface FormRecord {
   };
 }
 
-async function fetchLegBetDistribution(
+export async function fetchLegBetDistribution(
   parsed: ParsedAtgUrl & { raceId?: string },
 ): Promise<Map<number, number>> {
-  const result = new Map<number, number>();
-  if (parsed.gameType === 'UNKNOWN') return result;
+  if (parsed.gameType === 'UNKNOWN') return new Map();
 
   try {
     const calendar = await atgFetch<CalendarDay>(`/calendar/day/${parsed.date}`);
@@ -339,17 +345,20 @@ async function fetchLegBetDistribution(
       const trackId = TRACK_SLUGS[parsed.trackSlug.toLowerCase()];
       const expectedRaceId =
         trackId != null ? `${parsed.date}_${trackId}_${parsed.leg}` : null;
-      const vinnareGames =
-        calendar.games.vinnare ??
-        calendar.games.Vinnare ??
-        calendar.games.VINNARE ??
-        [];
+      const vinnareGames = [
+        ...(calendar.games.vinnare ??
+          calendar.games.Vinnare ??
+          calendar.games.VINNARE ??
+          []),
+        ...(calendar.games.vp ?? calendar.games.VP ?? []),
+        ...(calendar.games.plats ?? calendar.games.PLATS ?? []),
+      ];
       const game = vinnareGames.find(
         (g) =>
           g.races?.includes(expectedRaceId ?? '') ||
           (trackId != null && g.tracks?.includes(trackId) && g.races?.length === 1),
       );
-      if (!game?.id) return result;
+      if (!game?.id) return new Map();
 
       const raceData = await atgFetch<{
         races: Array<{
@@ -361,13 +370,9 @@ async function fetchLegBetDistribution(
       }>(`/games/${game.id}`);
 
       const legRace = raceData.races[0];
-      if (!legRace) return result;
+      if (!legRace) return new Map();
 
-      for (const start of legRace.starts) {
-        const raw = start.pools?.vinnare?.betDistribution;
-        if (raw != null) result.set(start.number, raw / 100);
-      }
-      return result;
+      return betDistributionFromLegRace(legRace, 'vinnare');
     }
 
     const keyLower = parsed.gameType.toLowerCase();
@@ -377,15 +382,19 @@ async function fetchLegBetDistribution(
       calendar.games[keyLower.toUpperCase()] ??
       [];
 
-    const trackId = TRACK_SLUGS[parsed.trackSlug.toLowerCase()];
-    let gameId: string | undefined;
-    for (const game of games) {
-      if (trackId && !game.id.includes(`_${trackId}_`)) continue;
-      gameId = game.id;
-      break;
+    const normalizedGames = (Array.isArray(games) ? games : [games]).filter(Boolean) as CalendarGame[];
+    const venue = parseVenueSlug(parsed.trackSlug);
+    let gameId = findCalendarGameForVenue(normalizedGames, venue)?.id;
+    if (!gameId) {
+      const trackId = TRACK_SLUGS[parsed.trackSlug.toLowerCase()];
+      for (const game of normalizedGames) {
+        if (trackId && !game.id.includes(`_${trackId}_`)) continue;
+        gameId = game.id;
+        break;
+      }
+      gameId ??= normalizedGames[0]?.id;
     }
-    gameId ??= games[0]?.id;
-    if (!gameId) return result;
+    if (!gameId) return new Map();
 
     const game = await atgFetch<{
       races: Array<{
@@ -397,23 +406,51 @@ async function fetchLegBetDistribution(
     }>(`/games/${gameId}`);
 
     const legRace = game.races[parsed.leg - 1];
-    if (!legRace) return result;
+    if (!legRace) return new Map();
 
-    const poolKeys = [parsed.gameType, parsed.gameType.toUpperCase(), keyLower];
-    for (const start of legRace.starts) {
-      if (!start.pools) continue;
-      for (const key of poolKeys) {
-        const raw = start.pools[key]?.betDistribution;
-        if (raw != null) {
-          result.set(start.number, raw / 100);
-          break;
-        }
-      }
-    }
+    return betDistributionFromLegRace(legRace, parsed.gameType);
   } catch {
     /* spel% är valfri */
   }
+  return new Map();
+}
+
+type LegRacePools = {
+  starts: Array<{
+    number: number;
+    pools?: Record<string, { betDistribution?: number }>;
+  }>;
+};
+
+function betDistributionFromLegRace(legRace: LegRacePools, gameType: string): Map<number, number> {
+  const result = new Map<number, number>();
+  const poolKeys = [gameType, gameType.toUpperCase(), gameType.toLowerCase(), 'vinnare', 'vp', 'plats'];
+  for (const start of legRace.starts) {
+    if (!start.pools) continue;
+    for (const key of poolKeys) {
+      const raw = start.pools[key]?.betDistribution;
+      if (raw != null) {
+        result.set(start.number, raw / 100);
+        break;
+      }
+    }
+  }
   return result;
+}
+
+export async function fetchBetDistributionForGameLeg(
+  atgGameId: string,
+  gameType: string,
+  legNumber: number,
+): Promise<Map<number, number>> {
+  try {
+    const game = await atgFetch<{ races: LegRacePools[] }>(`/games/${atgGameId}`);
+    const legRace = game.races[legNumber - 1];
+    if (!legRace) return new Map();
+    return betDistributionFromLegRace(legRace, gameType);
+  } catch {
+    return new Map();
+  }
 }
 
 function formatKmTime(km?: FormRecord['kmTime']): string | null {
@@ -552,11 +589,37 @@ export interface ImportedEntry {
   }>;
 }
 
-export async function importFromUrl(sourceUrl: string): Promise<ImportedRace> {
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= items.length) break;
+      results[index] = await fn(items[index]);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, () => worker()),
+  );
+  return results;
+}
+
+export async function importFromUrl(
+  sourceUrl: string,
+  options?: { startFetchConcurrency?: number },
+): Promise<ImportedRace> {
   const parsed = parseAtgUrl(sourceUrl);
   if (!parsed) {
     throw new Error(
-      'Ogiltig ATG-länk. Använd t.ex. atg.se/spel/gs75/2026-07-26/bana/avd/3, atg.se/spel/2026-07-27/vinnare/ostersund/lopp/2 eller en länk med race-id.',
+      'Ogiltig ATG-länk. Använd t.ex. atg.se/spel/gs75/2026-07-26/bana/avd/3, atg.se/spel/2026-07-27/vinnare/ostersund/lopp/2, atg.se/spel/2026-08-28/vp/bergsaker/lopp/2 eller en länk med race-id.',
     );
   }
 
@@ -566,6 +629,7 @@ export async function importFromUrl(sourceUrl: string): Promise<ImportedRace> {
   const entries: ImportedEntry[] = [];
   const volteRows = detectVolteRows(race.starts, race.startMethod ?? null);
   const betDistribution = await fetchLegBetDistribution(parsed);
+  const concurrency = options?.startFetchConcurrency ?? 5;
 
   for (const start of race.starts) {
     if (start.scratched) {
@@ -594,9 +658,11 @@ export async function importFromUrl(sourceUrl: string): Promise<ImportedRace> {
         formStarts: [],
         scratched: true,
       });
-      continue;
     }
+  }
 
+  const activeStarts = race.starts.filter((start) => !start.scratched);
+  const activeEntries = await mapWithConcurrency(activeStarts, concurrency, async (start) => {
     let startPoints = start.horse.statistics?.life?.startPoints ?? null;
     let earningsPerStart = normalizeEarningsPerStartFromAtg(
       start.horse.statistics?.life?.earningsPerStart,
@@ -629,7 +695,7 @@ export async function importFromUrl(sourceUrl: string): Promise<ImportedRace> {
 
     const actualPosition = extractActualPosition(start.result);
 
-    entries.push({
+    return {
       atgHorseId: start.horse.id,
       atgDriverId: start.driver?.id ?? null,
       atgTrainerId: trainerId,
@@ -670,10 +736,11 @@ export async function importFromUrl(sourceUrl: string): Promise<ImportedRace> {
         };
       }),
       scratched: false,
-    });
+    } satisfies ImportedEntry;
+  });
 
-    await new Promise((r) => setTimeout(r, 50));
-  }
+  entries.push(...activeEntries);
+  entries.sort((a, b) => a.startNumber - b.startNumber);
 
   return {
     atgRaceId: race.id,

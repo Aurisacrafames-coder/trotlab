@@ -1,5 +1,7 @@
 import type { GameSession, GameSessionLeg } from './types.js';
 import { formatGameLegLabel, formatTrackRaceLabel } from './format.js';
+import { classifyRaceProfile } from './raceProfile.js';
+import { formatStartMethodLabel } from './scoring.js';
 
 const DEFAULT_EMAIL = 'andersper.ek@gmail.com';
 const MAILTO_BODY_LIMIT = 1800;
@@ -20,18 +22,32 @@ function legHeading(game: GameSession, leg: GameSessionLeg): string {
   return formatGameLegLabel(game.gameType, leg.legNumber, leg.trackRaceNumber);
 }
 
-function formatLegPlain(game: GameSession, leg: GameSessionLeg, maxHorses = Infinity): string {
+function formatBetPct(pct: number | null | undefined): string {
+  if (pct == null || Number.isNaN(pct)) return '—';
+  return `${pct.toFixed(1)}%`;
+}
+
+function formatLegPlain(
+  game: GameSession,
+  leg: GameSessionLeg,
+  maxHorses = Infinity,
+  prepComment?: string,
+  spikeComment?: string,
+): string {
   const lines: string[] = [legHeading(game, leg)];
   const raceLabel = formatTrackRaceLabel(leg.trackRaceNumber);
   if (raceLabel) lines[0] += ` (${raceLabel})`;
   if (leg.raceInfo?.name) lines.push(leg.raceInfo.name);
+  if (leg.trackName) lines.push(`Bana: ${leg.trackName}`);
+  if (prepComment) lines.push(`Gardering: ${prepComment}`);
+  if (spikeComment) lines.push(`Spik ettan? ${spikeComment}`);
 
   const horses = leg.rankedHorses.slice(0, maxHorses);
   horses.forEach((horse) => {
     const watch = horse.isWatched ? ' ★' : '';
     const scratch = horse.scratched ? ' (struken)' : '';
     lines.push(
-      `  #${horse.startNumber} ${horse.horseName}${watch}${scratch} — ${horse.trotScore.toFixed(1)}`,
+      `  #${horse.startNumber} ${horse.horseName}${watch}${scratch} — ${horse.trotScore.toFixed(1)} (${formatBetPct(horse.betDistributionPct)})`,
     );
   });
 
@@ -42,7 +58,13 @@ function formatLegPlain(game: GameSession, leg: GameSessionLeg, maxHorses = Infi
   return lines.join('\n');
 }
 
-export function buildRankingPlainText(game: GameSession, maxHorsesPerLeg = Infinity): string {
+export function buildRankingPlainText(
+  game: GameSession,
+  maxHorsesPerLeg = Infinity,
+  prepBrief?: string,
+  legPrepComments?: Map<number, string>,
+  legSpikeComments?: Map<number, string>,
+): string {
   const header = [
     rankingExportTitle(game),
     `${game.legCount} avdelningar · TrotLab ranking`,
@@ -50,8 +72,17 @@ export function buildRankingPlainText(game: GameSession, maxHorsesPerLeg = Infin
     '',
   ].filter(Boolean);
 
-  const legs = game.legs.map((leg) => formatLegPlain(game, leg, maxHorsesPerLeg));
-  return [...header, ...legs].join('\n\n');
+  const briefBlock = prepBrief ? [prepBrief.trim(), ''] : [];
+  const legs = game.legs.map((leg) =>
+    formatLegPlain(
+      game,
+      leg,
+      maxHorsesPerLeg,
+      legPrepComments?.get(leg.legNumber),
+      legSpikeComments?.get(leg.legNumber),
+    ),
+  );
+  return [...header, ...briefBlock, ...legs].join('\n\n');
 }
 
 function escapeHtml(value: string): string {
@@ -62,7 +93,12 @@ function escapeHtml(value: string): string {
     .replace(/"/g, '&quot;');
 }
 
-function legTableHtml(game: GameSession, leg: GameSessionLeg): string {
+function legTableHtml(
+  game: GameSession,
+  leg: GameSessionLeg,
+  prepComment?: string,
+  spikeComment?: string,
+): string {
   const spike = game.suggestedSpikes.find((s) => s.legId === leg.id);
   const rows = leg.rankedHorses
     .map((horse, index) => {
@@ -75,13 +111,28 @@ function legTableHtml(game: GameSession, leg: GameSessionLeg): string {
       return `<tr class="${rowClass}">
         <td class="col-num">#${horse.startNumber}</td>
         <td class="col-horse">${escapeHtml(horse.horseName)}${horse.isWatched ? ' <span class="watch">★</span>' : ''}${horse.scratched ? ' <span class="muted">struken</span>' : ''}</td>
+        <td class="col-pct">${formatBetPct(horse.betDistributionPct)}</td>
         <td class="col-score">${horse.trotScore.toFixed(1)}</td>
       </tr>`;
     })
     .join('\n');
 
   const meta: string[] = [];
-  if (leg.raceInfo?.name) meta.push(escapeHtml(leg.raceInfo.name));
+  const profile = classifyRaceProfile(
+    leg.raceInfo?.name ?? null,
+    leg.raceInfo?.terms ?? [],
+    leg.distance,
+    leg.startMethod,
+  );
+  if (profile.summary) meta.push(escapeHtml(profile.summary));
+  if (leg.trackName) meta.push(escapeHtml(leg.trackName));
+  if (leg.raceInfo?.name && !profile.summary.includes(leg.raceInfo.name.slice(0, 20))) {
+    meta.push(escapeHtml(leg.raceInfo.name));
+  }
+  const startLabel = formatStartMethodLabel(leg.startMethod);
+  if (startLabel && !profile.summary.includes(startLabel.toLowerCase())) {
+    meta.push(escapeHtml(startLabel));
+  }
   if (leg.raceInfo?.scheduledStartTime) {
     const start = new Date(leg.raceInfo.scheduledStartTime.replace(' ', 'T'));
     if (!Number.isNaN(start.getTime())) {
@@ -94,12 +145,15 @@ function legTableHtml(game: GameSession, leg: GameSessionLeg): string {
     <header class="leg-header">
       <h2>${escapeHtml(legHeading(game, leg))}</h2>
       ${meta.length > 0 ? `<p class="leg-meta">${meta.join(' · ')}</p>` : ''}
+      ${prepComment ? `<p class="leg-prep-comment"><strong>Gardering inför lopp:</strong> ${escapeHtml(prepComment)}</p>` : ''}
+      ${spikeComment ? `<p class="leg-spike-hint"><strong>Spik ettan?</strong> ${escapeHtml(spikeComment)}</p>` : ''}
     </header>
     <table>
       <thead>
         <tr>
           <th>Nr</th>
           <th>Häst</th>
+          <th>Spel%</th>
           <th>Score</th>
         </tr>
       </thead>
@@ -110,10 +164,27 @@ function legTableHtml(game: GameSession, leg: GameSessionLeg): string {
   </section>`;
 }
 
-export function buildRankingHtmlDocument(game: GameSession): string {
+export function buildRankingHtmlDocument(
+  game: GameSession,
+  prepBriefHtml?: string,
+  legPrepComments?: Map<number, string>,
+  legSpikeComments?: Map<number, string>,
+): string {
   const title = rankingExportTitle(game);
-  const legs = game.legs.map((leg) => legTableHtml(game, leg)).join('\n');
+  const legs = game.legs
+    .map((leg) =>
+      legTableHtml(
+        game,
+        leg,
+        legPrepComments?.get(leg.legNumber),
+        legSpikeComments?.get(leg.legNumber),
+      ),
+    )
+    .join('\n');
   const exportedAt = new Date().toLocaleString('sv-SE', { dateStyle: 'medium', timeStyle: 'short' });
+  const briefSection = prepBriefHtml
+    ? `<section class="prep-brief">${prepBriefHtml}</section>`
+    : '';
 
   return `<!DOCTYPE html>
 <html lang="sv">
@@ -208,6 +279,7 @@ export function buildRankingHtmlDocument(game: GameSession): string {
     }
     tr:last-child td { border-bottom: none; }
     .col-num { width: 4rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .col-pct { width: 4.5rem; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
     .col-score { width: 4.5rem; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
     .rank-top { background: var(--top-bg); }
     .rank-top .col-score { color: var(--top); }
@@ -219,6 +291,58 @@ export function buildRankingHtmlDocument(game: GameSession): string {
       text-align: center;
       color: var(--muted);
       font-size: 0.85rem;
+    }
+    .prep-brief {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 1rem 1.15rem;
+      margin-bottom: 1.25rem;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+    }
+    .prep-brief-section h2 {
+      margin: 0 0 0.5rem;
+      font-size: 1rem;
+    }
+    .prep-brief-section + .prep-brief-section {
+      margin-top: 1rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--line);
+    }
+    .prep-brief ul {
+      margin: 0;
+      padding-left: 1.2rem;
+    }
+    .prep-brief li {
+      margin: 0.35rem 0;
+    }
+    .leg-prep-comment {
+      margin: 0.65rem 0 0;
+      padding: 0.75rem 0.9rem;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-left: 4px solid var(--accent);
+      border-radius: 0 10px 10px 0;
+      color: #0f172a;
+      font-size: 0.92rem;
+      line-height: 1.5;
+    }
+    .leg-prep-comment strong {
+      color: #1d4ed8;
+    }
+    .leg-spike-hint {
+      margin: 0.65rem 0 0;
+      padding: 0.75rem 0.9rem;
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      border-left: 4px solid #15803d;
+      border-radius: 0 10px 10px 0;
+      color: #0f172a;
+      font-size: 0.92rem;
+      line-height: 1.5;
+    }
+    .leg-spike-hint strong {
+      color: #15803d;
     }
     @media print {
       body { background: #fff; }
@@ -235,6 +359,7 @@ export function buildRankingHtmlDocument(game: GameSession): string {
       <h1>${escapeHtml(title)}</h1>
       <p class="hero-sub">${game.legCount} avdelningar${game.tipSubmittedAt ? ' · Tips låst' : ''}</p>
     </header>
+    ${briefSection}
     ${legs}
     <p class="footer">Exporterad ${escapeHtml(exportedAt)} · TrotLab</p>
   </div>
@@ -242,11 +367,15 @@ export function buildRankingHtmlDocument(game: GameSession): string {
 </html>`;
 }
 
-export function buildRankingEmailBody(game: GameSession): string {
-  let body = buildRankingPlainText(game);
+export function buildRankingEmailBody(
+  game: GameSession,
+  prepBrief?: string,
+  legPrepComments?: Map<number, string>,
+): string {
+  let body = buildRankingPlainText(game, Infinity, prepBrief, legPrepComments);
   if (body.length <= MAILTO_BODY_LIMIT) return body;
 
-  body = buildRankingPlainText(game, 5);
+  body = buildRankingPlainText(game, 5, prepBrief, legPrepComments);
   if (body.length <= MAILTO_BODY_LIMIT) {
     return `${body}\n\n(Full ranking med alla hästar — ladda ner HTML-filen från TrotLab och bifoga i mailet.)`;
   }
@@ -254,25 +383,42 @@ export function buildRankingEmailBody(game: GameSession): string {
   return `${rankingExportTitle(game)}\n\nRankingen är för lång för e-posttext. Ladda ner HTML-filen från TrotLab och bifoga den i mailet till ${DEFAULT_EMAIL}.`;
 }
 
-export function buildRankingMailtoUrl(game: GameSession, email = DEFAULT_EMAIL): string {
+export function buildRankingMailtoUrl(
+  game: GameSession,
+  email = DEFAULT_EMAIL,
+  prepBrief?: string,
+  legPrepComments?: Map<number, string>,
+): string {
   const subject = encodeURIComponent(`${rankingExportTitle(game)} — TrotLab ranking`);
-  const body = encodeURIComponent(buildRankingEmailBody(game));
+  const body = encodeURIComponent(buildRankingEmailBody(game, prepBrief, legPrepComments));
   return `mailto:${email}?subject=${subject}&body=${body}`;
 }
 
-export function downloadRankingHtml(game: GameSession): void {
-  const html = buildRankingHtmlDocument(game);
+export function downloadHtmlFile(filename: string, html: string): void {
   const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
-  anchor.download = rankingExportFilename(game);
+  anchor.download = filename;
   anchor.click();
   URL.revokeObjectURL(url);
 }
 
-export function openRankingPrintPreview(game: GameSession): void {
-  const html = buildRankingHtmlDocument(game);
+export function downloadRankingHtml(
+  game: GameSession,
+  prepBriefHtml?: string,
+  legPrepComments?: Map<number, string>,
+): void {
+  const html = buildRankingHtmlDocument(game, prepBriefHtml, legPrepComments);
+  downloadHtmlFile(rankingExportFilename(game), html);
+}
+
+export function openRankingPrintPreview(
+  game: GameSession,
+  prepBriefHtml?: string,
+  legPrepComments?: Map<number, string>,
+): void {
+  const html = buildRankingHtmlDocument(game, prepBriefHtml, legPrepComments);
   const preview = window.open('', '_blank');
   if (!preview) return;
   preview.document.write(html);

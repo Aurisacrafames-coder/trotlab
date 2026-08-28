@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { deleteGameSession, fetchGameSession, fetchGameSessions, fetchStatsSync, syncTrackStats, type GameSessionListItem } from '../api';
-import { downloadRankingHtml } from '../../shared/rankingExport';
+import { deleteGameSession, fetchGameRankingExport, fetchGameSessions, fetchStatsSync, syncTrackStats, type GameSessionListItem } from '../api';
+import { downloadHtmlFile } from '../../shared/rankingExport';
 
 export default function HomePage() {
   const [games, setGames] = useState<GameSessionListItem[]>([]);
@@ -32,8 +32,8 @@ export default function HomePage() {
     setExportingId(game.id);
     setError(null);
     try {
-      const full = await fetchGameSession(game.id);
-      downloadRankingHtml(full);
+      const data = await fetchGameRankingExport(game.id);
+      downloadHtmlFile(data.filename, data.html);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Kunde inte exportera ranking');
     } finally {

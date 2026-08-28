@@ -1,31 +1,59 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { GameSession } from '../../shared/types';
-import {
-  buildRankingHtmlDocument,
-  buildRankingMailtoUrl,
-  buildRankingPlainText,
-  downloadRankingHtml,
-  openRankingPrintPreview,
-  rankingExportTitle,
-  RANKING_EXPORT_EMAIL,
-} from '../../shared/rankingExport';
+import { fetchGameRankingExport, type GameRankingExport } from '../api';
+import { rankingExportTitle, RANKING_EXPORT_EMAIL, downloadHtmlFile } from '../../shared/rankingExport';
 
 interface RankingExportPanelProps {
   game: GameSession;
 }
 
+function openPrintPreview(html: string) {
+  const preview = window.open('', '_blank');
+  if (!preview) return;
+  preview.document.write(html);
+  preview.document.close();
+  preview.focus();
+  preview.onload = () => preview.print();
+}
+
 export default function RankingExportPanel({ game }: RankingExportPanelProps) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [exportData, setExportData] = useState<GameRankingExport | null>(null);
 
-  const html = useMemo(() => buildRankingHtmlDocument(game), [game]);
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetchGameRankingExport(game.id)
+      .then((data) => {
+        if (!cancelled) setExportData(data);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : 'Kunde inte skapa ranking-export');
+          setExportData(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, game.id]);
+
   const title = rankingExportTitle(game);
+  const ready = exportData != null && !loading;
 
   async function handleCopy() {
+    if (!exportData) return;
     setError(null);
     try {
-      await navigator.clipboard.writeText(buildRankingPlainText(game));
+      await navigator.clipboard.writeText(exportData.plainText);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -34,7 +62,10 @@ export default function RankingExportPanel({ game }: RankingExportPanelProps) {
   }
 
   function handleEmail() {
-    window.location.href = buildRankingMailtoUrl(game);
+    if (!exportData) return;
+    const subject = encodeURIComponent(`${exportData.title} — TrotLab ranking`);
+    const body = encodeURIComponent(exportData.plainText);
+    window.location.href = `mailto:${RANKING_EXPORT_EMAIL}?subject=${subject}&body=${body}`;
   }
 
   if (!open) {
@@ -59,34 +90,45 @@ export default function RankingExportPanel({ game }: RankingExportPanelProps) {
         </button>
       </div>
 
+      {loading && <p className="muted">Bygger ranking med bananalys och gardering…</p>}
+      {error && <p className="error">{error}</p>}
+
       <div className="ranking-export-actions">
-        <button type="button" onClick={() => downloadRankingHtml(game)}>
+        <button
+          type="button"
+          onClick={() => exportData && downloadHtmlFile(exportData.filename, exportData.html)}
+          disabled={!ready}
+        >
           Ladda ner HTML
         </button>
-        <button type="button" className="secondary" onClick={() => openRankingPrintPreview(game)}>
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => exportData && openPrintPreview(exportData.html)}
+          disabled={!ready}
+        >
           Skriv ut / PDF
         </button>
-        <button type="button" className="secondary" onClick={handleEmail}>
+        <button type="button" className="secondary" onClick={handleEmail} disabled={!ready}>
           Skicka e-post
         </button>
-        <button type="button" className="secondary" onClick={handleCopy}>
+        <button type="button" className="secondary" onClick={handleCopy} disabled={!ready}>
           {copied ? 'Kopierad!' : 'Kopiera text'}
         </button>
       </div>
 
-      {error && <p className="error">{error}</p>}
-
       <p className="muted ranking-export-hint">
-        Tips: Ladda ner HTML-filen och bifoga den i mailet om du vill skicka hela listan snyggt
-        formaterad.
+        Exporten byggs på servern med gardering per avdelning från banhistorik.
       </p>
 
-      <iframe
-        className="ranking-export-preview"
-        title={`Ranking ${title}`}
-        srcDoc={html}
-        sandbox="allow-same-origin"
-      />
+      {exportData && (
+        <iframe
+          className="ranking-export-preview"
+          title={`Ranking ${title}`}
+          srcDoc={exportData.html}
+          sandbox="allow-same-origin"
+        />
+      )}
     </div>
   );
 }
