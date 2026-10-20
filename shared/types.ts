@@ -249,6 +249,8 @@ export interface BacktestOptimizeResult {
   goal: BacktestGoal;
   atgTrackId: number;
   trackName: string;
+  /** Spelform som optimerades mot (tom = alla). */
+  gameType?: string;
   racesWithResult: number;
   baseline: BacktestSummary;
   optimized: BacktestSummary;
@@ -368,6 +370,8 @@ export interface AutoOptimizerStatus {
   running: boolean;
   atgTrackId: number | null;
   trackName: string | null;
+  /** Tom sträng = alla spelformer på banan. */
+  gameType?: string | null;
   goal: BacktestGoal | null;
   trialsRun: number;
   bestHits: number | null;
@@ -386,8 +390,16 @@ export interface KnownTrack {
 
 export interface TrackProfileSummary {
   atgTrackId: number;
+  /** Tom sträng = alla spelformer på banan. */
+  gameType: string;
   trackName: string;
   updatedAt: string;
+  raceCount: number;
+  racesWithResult: number;
+}
+
+export interface BacktestGameTypeOption {
+  gameType: string;
   raceCount: number;
   racesWithResult: number;
 }

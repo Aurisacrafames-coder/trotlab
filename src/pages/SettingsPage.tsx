@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
   fetchAutoOptimizerStatus,
+  fetchBacktestGameTypes,
   fetchBacktestTracks,
   fetchKnownTracks,
   fetchParameters,
@@ -12,9 +13,15 @@ import {
   saveParameters,
   saveTrackProfile,
 } from '../api';
+import {
+  formatProfileGameTypeLabel,
+  normalizeProfileGameType,
+  PROFILE_GAME_TYPE_OPTIONS,
+} from '../../shared/trackProfileGameTypes';
 import { formatGameLegLabel, formatWeightShare, formatWeightValue, formatActualPosition } from '../../shared/format';
 import type {
   AutoOptimizerStatus,
+  BacktestGameTypeOption,
   BacktestGoal,
   BacktestOptimizeResult,
   BacktestSummary,
@@ -39,12 +46,14 @@ function hitLabel(hit: 'win' | 'top3' | 'miss', winnerRank?: number | null) {
 function AutoOptimizeBanner({
   status,
   activeProfileTrackId,
+  activeProfileGameType,
   activeTrackName,
   onApplyWeights,
   onUseResult,
 }: {
   status: AutoOptimizerStatus;
   activeProfileTrackId: number | null;
+  activeProfileGameType: string;
   activeTrackName: string | null;
   onApplyWeights: (weights: Parameter[]) => void;
   onUseResult: (result: BacktestOptimizeResult) => void;
@@ -86,25 +95,37 @@ function AutoOptimizeBanner({
   }
 
   const result = status.lastResult;
+  const resultGameType = normalizeProfileGameType(result.gameType);
+  const profileGameType = normalizeProfileGameType(activeProfileGameType);
   const resultMatchesProfile =
-    activeProfileTrackId == null || result.atgTrackId === activeProfileTrackId;
+    (activeProfileTrackId == null || result.atgTrackId === activeProfileTrackId) &&
+    (activeProfileTrackId == null || resultGameType === profileGameType);
 
   if (!resultMatchesProfile) {
+    const scope = formatProfileGameTypeLabel(profileGameType);
     return (
       <div className="auto-opt-banner">
         <p className="muted" style={{ margin: 0 }}>
-          Senaste sparade optimering gäller <strong>{result.trackName}</strong>, inte{' '}
-          {activeTrackName ?? 'den valda banan'}. Kör <strong>Optimera vikter</strong> nedan för{' '}
-          {activeTrackName ?? 'banan'}.
+          Senaste sparade optimering gäller{' '}
+          <strong>
+            {result.trackName}
+            {resultGameType ? ` (${resultGameType})` : ' (alla spelformer)'}
+          </strong>
+          , inte {activeTrackName ?? 'den valda banan'} ({scope}). Kör{' '}
+          <strong>Optimera vikter</strong> nedan.
         </p>
       </div>
     );
   }
 
   const displayTrackName = activeTrackName ?? result.trackName;
+  const displayScope = resultGameType ? ` · ${resultGameType}` : ' · alla spelformer';
   return (
     <div className="auto-opt-banner auto-opt-done">
-      <strong>Optimering klar — {displayTrackName}</strong>
+      <strong>
+        Optimering klar — {displayTrackName}
+        {displayScope}
+      </strong>
       {status.lastRunAt && (
         <p className="muted" style={{ margin: '0.35rem 0 0' }}>
           Senast körd {new Date(status.lastRunAt).toLocaleString('sv-SE')}
@@ -154,6 +175,8 @@ function BacktestPanel({
   params,
   profileMode,
   profileTrackId,
+  profileGameType,
+  onProfileGameTypeChange,
   activeTrackName,
   onApplyWeights,
   onSelectProfileTrack,
@@ -161,6 +184,8 @@ function BacktestPanel({
   params: Parameter[];
   profileMode: 'global' | number;
   profileTrackId: number | null;
+  profileGameType: string;
+  onProfileGameTypeChange: (gameType: string) => void;
   activeTrackName: string | null;
   onApplyWeights: (weights: Parameter[]) => void;
   onSelectProfileTrack: (atgTrackId: number) => void;
@@ -168,6 +193,8 @@ function BacktestPanel({
   const [tracks, setTracks] = useState<BacktestTrackOption[]>([]);
   const [tracksLoading, setTracksLoading] = useState(true);
   const [atgTrackId, setAtgTrackId] = useState<number | ''>('');
+  const [gameTypeOptions, setGameTypeOptions] = useState<BacktestGameTypeOption[]>([]);
+  const [optimizeGameType, setOptimizeGameType] = useState(profileGameType);
   const [startMethod, setStartMethod] = useState<'' | 'auto' | 'volte'>('');
   const [goal, setGoal] = useState<BacktestGoal>(DEFAULT_BACKTEST_GOAL);
   const [maxTrials, setMaxTrials] = useState<number>(OPTIMIZE_TRIALS_DEFAULT);
@@ -182,22 +209,43 @@ function BacktestPanel({
     fetchBacktestTracks()
       .then((list) => {
         setTracks(list);
-        if (profileTrackId != null && list.some((t) => t.atgTrackId === profileTrackId)) {
-          setAtgTrackId(profileTrackId);
-        } else if (list.length === 1) {
+        if (list.length === 1) {
           setAtgTrackId(list[0].atgTrackId);
-        } else if (profileTrackId == null) {
-          setAtgTrackId('');
         }
       })
       .finally(() => setTracksLoading(false));
-  }, [profileTrackId]);
+  }, []);
 
   useEffect(() => {
-    if (profileTrackId != null) {
+    if (profileTrackId != null && tracks.some((t) => t.atgTrackId === profileTrackId)) {
       setAtgTrackId(profileTrackId);
+    } else if (profileTrackId == null) {
+      setAtgTrackId('');
     }
-  }, [profileTrackId]);
+  }, [profileTrackId, tracks]);
+
+  useEffect(() => {
+    setOptimizeGameType(profileGameType);
+  }, [profileGameType]);
+
+  useEffect(() => {
+    const trackId = profileTrackId ?? (atgTrackId === '' ? null : Number(atgTrackId));
+    if (trackId == null) {
+      setGameTypeOptions([]);
+      return;
+    }
+    let cancelled = false;
+    fetchBacktestGameTypes(trackId)
+      .then((list) => {
+        if (!cancelled) setGameTypeOptions(list);
+      })
+      .catch(() => {
+        if (!cancelled) setGameTypeOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [profileTrackId, atgTrackId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -208,7 +256,7 @@ function BacktestPanel({
 
     async function pollAutoStatus() {
       try {
-        const status = await fetchAutoOptimizerStatus(trackFilter);
+        const status = await fetchAutoOptimizerStatus(trackFilter, optimizeGameType);
         if (!cancelled) setAutoStatus(status);
       } catch {
         // ignore polling errors
@@ -221,15 +269,20 @@ function BacktestPanel({
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [profileTrackId, atgTrackId]);
+  }, [profileTrackId, atgTrackId, optimizeGameType]);
 
   const selectedTrack = tracks.find((t) => t.atgTrackId === atgTrackId);
   const workingTrackName =
     profileTrackId != null ? activeTrackName : selectedTrack?.trackName ?? null;
-  const canOptimize = atgTrackId !== '' && (selectedTrack?.racesWithResult ?? 0) >= 3;
+  const scopedRacesWithResult =
+    optimizeGameType === ''
+      ? selectedTrack?.racesWithResult ?? 0
+      : gameTypeOptions.find((g) => g.gameType === optimizeGameType)?.racesWithResult ?? 0;
+  const canOptimize = atgTrackId !== '' && scopedRacesWithResult >= 3;
   const filterBody = {
     atgTrackId: Number(atgTrackId),
     startMethod: startMethod || null,
+    gameType: optimizeGameType || null,
     goal,
   };
 
@@ -262,7 +315,7 @@ function BacktestPanel({
 
       while (status.running) {
         await new Promise((resolve) => window.setTimeout(resolve, 2000));
-        status = await fetchAutoOptimizerStatus(trackId);
+        status = await fetchAutoOptimizerStatus(trackId, optimizeGameType);
         setAutoStatus(status);
       }
 
@@ -300,8 +353,10 @@ function BacktestPanel({
       {profileTrackId != null && workingTrackName && (
         <p className="profile-context-box">
           Optimering och test gäller <strong>{workingTrackName}</strong>
+          {' · '}
+          <strong>{formatProfileGameTypeLabel(optimizeGameType)}</strong>
           {selectedTrack
-            ? ` · ${selectedTrack.racesWithResult} lopp med resultat i databasen`
+            ? ` · ${scopedRacesWithResult} lopp med resultat i urvalet`
             : ' · inga importerade lopp ännu — '}
           {!selectedTrack && <Link to="/import">importera historik</Link>}
         </p>
@@ -316,12 +371,14 @@ function BacktestPanel({
         <AutoOptimizeBanner
           status={autoStatus}
           activeProfileTrackId={profileTrackId}
+          activeProfileGameType={optimizeGameType}
           activeTrackName={activeTrackName}
           onApplyWeights={onApplyWeights}
           onUseResult={(result) => {
             setOptimizeResult(result);
             setAtgTrackId(result.atgTrackId);
             onSelectProfileTrack(result.atgTrackId);
+            onProfileGameTypeChange(normalizeProfileGameType(result.gameType));
           }}
         />
       )}
@@ -360,6 +417,41 @@ function BacktestPanel({
           )}
 
           <div className="backtest-filters">
+            <label className="backtest-field">
+              <span className="muted">Spelform</span>
+              <select
+                value={optimizeGameType}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setOptimizeGameType(next);
+                  onProfileGameTypeChange(next);
+                }}
+              >
+                {PROFILE_GAME_TYPE_OPTIONS.filter(
+                  (opt) =>
+                    opt.value === '' ||
+                    gameTypeOptions.some(
+                      (g) => g.gameType === opt.value && g.racesWithResult > 0,
+                    ) ||
+                    gameTypeOptions.some((g) => g.gameType === opt.value),
+                ).map((opt) => {
+                  const stats = gameTypeOptions.find((g) => g.gameType === opt.value);
+                  const suffix =
+                    opt.value === '' && selectedTrack
+                      ? ` (${selectedTrack.racesWithResult} med resultat)`
+                      : stats
+                        ? ` (${stats.racesWithResult} med resultat)`
+                        : '';
+                  return (
+                    <option key={opt.value || 'all'} value={opt.value}>
+                      {opt.label}
+                      {suffix}
+                    </option>
+                  );
+                })}
+              </select>
+            </label>
+
             <label className="backtest-field">
               <span className="muted">Startmetod</span>
               <select
@@ -428,15 +520,16 @@ function BacktestPanel({
             </button>
           </div>
 
-          {!canOptimize && selectedTrack && selectedTrack.racesWithResult > 0 && selectedTrack.racesWithResult < 3 && (
+          {!canOptimize && selectedTrack && scopedRacesWithResult > 0 && scopedRacesWithResult < 3 && (
             <p className="backtest-warn">
-              Minst 3 lopp med resultat krävs för optimering ({selectedTrack.racesWithResult} hittills).
+              Minst 3 lopp med resultat krävs för optimering ({scopedRacesWithResult} hittills
+              {optimizeGameType ? ` för ${optimizeGameType}` : ''}).
             </p>
           )}
 
-          {selectedTrack && selectedTrack.racesWithResult >= 3 && selectedTrack.racesWithResult < 5 && (
+          {selectedTrack && scopedRacesWithResult >= 3 && scopedRacesWithResult < 5 && (
             <p className="muted backtest-warn">
-              Bara {selectedTrack.racesWithResult} lopp med resultat — resultatet kan vara opålitligt.
+              Bara {scopedRacesWithResult} lopp med resultat — resultatet kan vara opålitligt.
               Importera fler avslutade omgångar på banan för bättre underlag.
             </p>
           )}
@@ -607,7 +700,8 @@ function BacktestResultCard({
 export default function SettingsPage() {
   const [searchParams] = useSearchParams();
   const [params, setParams] = useState<Parameter[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [profileLoading, setProfileLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [profileMode, setProfileMode] = useState<'global' | number>(() => {
@@ -618,6 +712,7 @@ export default function SettingsPage() {
   });
   const [knownTracks, setKnownTracks] = useState<KnownTrack[]>([]);
   const [trackProfiles, setTrackProfiles] = useState<TrackProfileSummary[]>([]);
+  const [profileGameType, setProfileGameType] = useState('');
 
   const activeTrack =
     profileMode === 'global'
@@ -627,7 +722,11 @@ export default function SettingsPage() {
   const activeProfileSummary =
     profileMode === 'global'
       ? null
-      : trackProfiles.find((p) => p.atgTrackId === profileMode) ?? null;
+      : trackProfiles.find(
+          (p) =>
+            p.atgTrackId === profileMode &&
+            normalizeProfileGameType(p.gameType) === normalizeProfileGameType(profileGameType),
+        ) ?? null;
 
   useEffect(() => {
     Promise.all([fetchKnownTracks(), fetchTrackProfiles()]).then(([tracks, profiles]) => {
@@ -637,20 +736,32 @@ export default function SettingsPage() {
   }, []);
 
   useEffect(() => {
-    setLoading(true);
+    let cancelled = false;
+    setProfileLoading(true);
     setMessage(null);
     const load =
       profileMode === 'global'
-        ? fetchParameters().then((globalParams) => globalParams)
-        : Promise.all([fetchParameters(), fetchTrackProfile(profileMode)]).then(
-            ([globalParams, trackParams]) =>
-              mergeTrackParameterWeights(trackParams, globalParams),
+        ? fetchParameters()
+        : Promise.all([fetchParameters(), fetchTrackProfile(profileMode, profileGameType)]).then(
+            ([globalParams, trackParams]) => mergeTrackParameterWeights(trackParams, globalParams),
           );
     load
-      .then(setParams)
-      .catch((e) => setMessage(e instanceof Error ? e.message : 'Kunde inte ladda vikter'))
-      .finally(() => setLoading(false));
-  }, [profileMode]);
+      .then((nextParams) => {
+        if (!cancelled) setParams(nextParams);
+      })
+      .catch((e) => {
+        if (!cancelled) setMessage(e instanceof Error ? e.message : 'Kunde inte ladda vikter');
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setProfileLoading(false);
+          setInitialLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [profileMode, profileGameType]);
 
   function updateWeight(id: string, weight: number) {
     setParams((prev) =>
@@ -665,10 +776,14 @@ export default function SettingsPage() {
         return suggested ? { ...p, weight: suggested.weight } : p;
       }),
     );
+    const scope =
+      profileMode === 'global'
+        ? ''
+        : ` (${formatProfileGameTypeLabel(profileGameType)})`;
     setMessage(
       profileMode === 'global'
         ? 'Föreslagna vikter införda — spara för att aktivera.'
-        : `Föreslagna vikter införda — spara ${activeTrack?.name ?? 'banan'}-profilen.`,
+        : `Föreslagna vikter införda — spara ${activeTrack?.name ?? 'banan'}-profilen${scope}.`,
     );
   }
 
@@ -683,11 +798,19 @@ export default function SettingsPage() {
         setParams(saved);
         setMessage('Global profil sparad — lopp utan banprofil/tips omräknade.');
       } else if (activeTrack) {
-        const saved = await saveTrackProfile(activeTrack.atgTrackId, activeTrack.name, params);
+        const saved = await saveTrackProfile(
+          activeTrack.atgTrackId,
+          activeTrack.name,
+          params,
+          profileGameType,
+        );
         setParams(saved);
         const profiles = await fetchTrackProfiles();
         setTrackProfiles(profiles);
-        setMessage(`${activeTrack.name}-profil sparad — lopp på banan utan tips omräknade.`);
+        const scope = formatProfileGameTypeLabel(profileGameType);
+        setMessage(
+          `${activeTrack.name}-profil sparad (${scope}) — berörda lopp utan tips omräknade.`,
+        );
       }
     } catch (e) {
       setMessage(e instanceof Error ? e.message : 'Kunde inte spara');
@@ -696,7 +819,7 @@ export default function SettingsPage() {
     }
   }
 
-  if (loading) return <p className="muted">Laddar…</p>;
+  if (initialLoading) return <p className="muted">Laddar…</p>;
 
   return (
     <>
@@ -725,6 +848,22 @@ export default function SettingsPage() {
           </select>
         </label>
 
+        {profileMode !== 'global' && (
+          <label className="backtest-field profile-select-field">
+            <span className="profile-context-label">Spelform för profil</span>
+            <select
+              value={profileGameType}
+              onChange={(e) => setProfileGameType(e.target.value)}
+            >
+              {PROFILE_GAME_TYPE_OPTIONS.map((opt) => (
+                <option key={opt.value || 'all'} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+
         <div className="profile-active-banner" aria-live="polite">
           <div className="profile-active-banner-label">Du redigerar nu</div>
           <div className="profile-active-banner-name">
@@ -732,6 +871,8 @@ export default function SettingsPage() {
           </div>
           {profileMode !== 'global' && (
             <div className="profile-active-banner-meta muted">
+              {formatProfileGameTypeLabel(profileGameType)}
+              {' · '}
               {activeProfileSummary
                 ? `Sparad profil · uppdaterad ${new Date(activeProfileSummary.updatedAt).toLocaleString('sv-SE')}`
                 : 'Ingen sparad profil ännu — justera vikter och spara nedan'}
@@ -742,7 +883,13 @@ export default function SettingsPage() {
         {trackProfiles.length > 0 && (
           <p className="muted profile-saved-list">
             Sparade banprofiler:{' '}
-            {trackProfiles.map((p) => p.trackName).join(', ')}
+            {trackProfiles
+              .map((p) =>
+                p.gameType
+                  ? `${p.trackName} (${p.gameType})`
+                  : `${p.trackName} (alla)`,
+              )
+              .join(', ')}
             {profileMode !== 'global' && activeTrack && !activeProfileSummary
               ? ` (${activeTrack.name} saknas här tills du sparar)`
               : ''}
@@ -755,7 +902,9 @@ export default function SettingsPage() {
           </p>
         ) : (
           <p className="muted" style={{ marginTop: 0 }}>
-            Gäller alla lopp på <strong>{activeTrack?.name}</strong> som inte har sparat tips.
+            Gäller <strong>{formatProfileGameTypeLabel(profileGameType)}</strong> på{' '}
+            <strong>{activeTrack?.name}</strong> (fallback till &quot;Alla spelformer&quot; om ingen
+            egen profil finns för just den spelformen).
             {activeProfileSummary && (
               <>
                 {' '}
@@ -802,6 +951,10 @@ export default function SettingsPage() {
           <code>Trot Score = Σ (poäng/10 × vikt) / Σ vikter × 100</code>
         </div>
 
+        {profileLoading ? (
+          <p className="muted">Laddar vikter för {activeTrack?.name ?? 'banan'}…</p>
+        ) : (
+          <>
         <div className="weight-bar" aria-hidden="true">
           {params.map((p) =>
             totalWeight > 0 && p.weight > 0 ? (
@@ -878,12 +1031,12 @@ export default function SettingsPage() {
           Lopp där du sparat tips påverkas inte förrän du räknar om dem manuellt.
         </p>
 
-        <button onClick={handleSave} disabled={saving || totalWeight === 0}>
+        <button onClick={handleSave} disabled={saving || profileLoading || totalWeight === 0}>
           {saving
             ? 'Sparar…'
             : profileMode === 'global'
               ? 'Spara global profil'
-              : `Spara ${activeTrack?.name ?? 'bana'}-profil`}
+              : `Spara ${activeTrack?.name ?? 'bana'} (${formatProfileGameTypeLabel(profileGameType)})`}
         </button>
         <p className="muted settings-save-hint">
           Steg 4 efter optimering: spara här för att Trot Score ska använda vikterna på banan.
@@ -892,7 +1045,7 @@ export default function SettingsPage() {
           type="button"
           className="secondary"
           style={{ marginLeft: '0.75rem' }}
-          disabled={saving}
+          disabled={saving || profileLoading}
           onClick={() => {
             setParams((prev) =>
               prev.map((p) => {
@@ -912,6 +1065,8 @@ export default function SettingsPage() {
             {message}
           </p>
         )}
+          </>
+        )}
       </div>
 
       <div className="card">
@@ -920,6 +1075,8 @@ export default function SettingsPage() {
           params={params}
           profileMode={profileMode}
           profileTrackId={profileMode === 'global' ? null : profileMode}
+          profileGameType={profileGameType}
+          onProfileGameTypeChange={setProfileGameType}
           activeTrackName={activeTrack?.name ?? null}
           onApplyWeights={applySuggestedWeights}
           onSelectProfileTrack={(atgTrackId) => setProfileMode(atgTrackId)}

@@ -425,6 +425,7 @@ function migrateSchema(database: Database.Database) {
   }
   database.exec(`CREATE INDEX IF NOT EXISTS idx_game_sessions_venue ON game_sessions(game_type, date, venue_slug)`);
 
+  migrateTrackProfileGameType(database);
   seedNewParameters(database);
   backfillGameSessions(database);
   migrateTrackPostStats(database);
@@ -592,6 +593,46 @@ function backfillTrackRaceNumbers(database: Database.Database) {
     const num = parseInt(parts[parts.length - 1] ?? '', 10);
     if (!Number.isNaN(num)) update.run(num, row.id);
   }
+}
+
+function migrateTrackProfileGameType(database: Database.Database) {
+  const metaCols = database
+    .prepare('PRAGMA table_info(track_profile_meta)')
+    .all() as Array<{ name: string }>;
+  if (metaCols.some((c) => c.name === 'game_type')) return;
+
+  database.exec(`
+    CREATE TABLE track_profile_meta_new (
+      atg_track_id INTEGER NOT NULL,
+      game_type TEXT NOT NULL DEFAULT '',
+      track_name TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (atg_track_id, game_type)
+    );
+    INSERT INTO track_profile_meta_new (atg_track_id, game_type, track_name, updated_at)
+      SELECT atg_track_id, '', track_name, updated_at FROM track_profile_meta;
+    DROP TABLE track_profile_meta;
+    ALTER TABLE track_profile_meta_new RENAME TO track_profile_meta;
+
+    CREATE TABLE track_weight_profiles_new (
+      atg_track_id INTEGER NOT NULL,
+      game_type TEXT NOT NULL DEFAULT '',
+      parameter_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      weight REAL NOT NULL,
+      min_score REAL NOT NULL DEFAULT 0,
+      max_score REAL NOT NULL DEFAULT 10,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      auto_key TEXT,
+      PRIMARY KEY (atg_track_id, game_type, parameter_id)
+    );
+    INSERT INTO track_weight_profiles_new
+      (atg_track_id, game_type, parameter_id, name, weight, min_score, max_score, sort_order, auto_key)
+      SELECT atg_track_id, '', parameter_id, name, weight, min_score, max_score, sort_order, auto_key
+      FROM track_weight_profiles;
+    DROP TABLE track_weight_profiles;
+    ALTER TABLE track_weight_profiles_new RENAME TO track_weight_profiles;
+  `);
 }
 
 function migrateTrackPostStats(database: Database.Database) {
@@ -772,23 +813,24 @@ function backfillTrackProfileParameters(database: Database.Database) {
   }>;
 
   const tracks = database
-    .prepare(`SELECT atg_track_id as atgTrackId FROM track_profile_meta`)
-    .all() as Array<{ atgTrackId: number }>;
+    .prepare(`SELECT atg_track_id as atgTrackId, game_type as gameType FROM track_profile_meta`)
+    .all() as Array<{ atgTrackId: number; gameType: string }>;
 
   const existing = database.prepare(
-    `SELECT 1 FROM track_weight_profiles WHERE atg_track_id = ? AND parameter_id = ?`,
+    `SELECT 1 FROM track_weight_profiles WHERE atg_track_id = ? AND game_type = ? AND parameter_id = ?`,
   );
   const insert = database.prepare(`
     INSERT INTO track_weight_profiles
-      (atg_track_id, parameter_id, name, weight, min_score, max_score, sort_order, auto_key)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      (atg_track_id, game_type, parameter_id, name, weight, min_score, max_score, sort_order, auto_key)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   for (const track of tracks) {
     for (const param of globalParams) {
-      if (existing.get(track.atgTrackId, param.id)) continue;
+      if (existing.get(track.atgTrackId, track.gameType, param.id)) continue;
       insert.run(
         track.atgTrackId,
+        track.gameType,
         param.id,
         param.name,
         param.weight,

@@ -18,6 +18,22 @@ export function findOrCreateGameSession(
     atgGameId?: string | null;
   },
 ): number {
+  if (data.atgGameId) {
+    const byAtgGame = db
+      .prepare(`SELECT id FROM game_sessions WHERE atg_game_id = ?`)
+      .get(data.atgGameId) as { id: number } | undefined;
+    if (byAtgGame) {
+      if (data.venueSlug?.includes('-')) {
+        db.prepare(
+          `UPDATE game_sessions
+           SET track_name = ?, venue_slug = ?, atg_track_id = ?
+           WHERE id = ?`,
+        ).run(data.trackName, data.venueSlug, data.atgTrackId, byAtgGame.id);
+      }
+      return byAtgGame.id;
+    }
+  }
+
   if (data.venueSlug) {
     const byVenue = db
       .prepare(
@@ -401,7 +417,7 @@ export function listGameSessions(db: Database.Database): GameSessionListItem[] {
   const games = db
     .prepare(
       `SELECT id, game_type as gameType, date, track_name as trackName,
-              tip_submitted_at as tipSubmittedAt
+              atg_track_id as atgTrackId, tip_submitted_at as tipSubmittedAt
        FROM game_sessions ORDER BY date DESC, id DESC`,
     )
     .all() as Array<{
@@ -409,21 +425,88 @@ export function listGameSessions(db: Database.Database): GameSessionListItem[] {
     gameType: string;
     date: string;
     trackName: string;
+    atgTrackId: number | null;
     tipSubmittedAt: string | null;
   }>;
 
-  return games.map((g) => {
-    const full = loadGameSession(db, g.id)!;
+  if (games.length === 0) return [];
+
+  const legCounts = db
+    .prepare(
+      `SELECT game_session_id as gameSessionId, COUNT(*) as legCount
+       FROM race_sessions WHERE game_session_id IS NOT NULL
+       GROUP BY game_session_id`,
+    )
+    .all() as Array<{ gameSessionId: number; legCount: number }>;
+  const legCountByGame = new Map(legCounts.map((row) => [row.gameSessionId, row.legCount]));
+
+  const entryRows = db
+    .prepare(
+      `SELECT rs.game_session_id as gameSessionId,
+              rs.id as sessionId,
+              rs.status,
+              re.actual_position as actualPosition,
+              re.trot_score as trotScore,
+              re.scratched,
+              re.start_number as startNumber
+       FROM race_sessions rs
+       JOIN race_entries re ON re.session_id = rs.id
+       WHERE rs.game_session_id IS NOT NULL AND re.trot_score IS NOT NULL
+       ORDER BY rs.game_session_id, rs.leg_number, re.scratched ASC, re.trot_score DESC, re.start_number ASC`,
+    )
+    .all() as Array<{
+    gameSessionId: number;
+    sessionId: number;
+    status: string | null;
+    actualPosition: number | null;
+    trotScore: number;
+    scratched: number;
+    startNumber: number;
+  }>;
+
+  const legsByGame = new Map<
+    number,
+    Map<number, { status: string | null; topPositions: Array<number | null> }>
+  >();
+
+  for (const row of entryRows) {
+    let gameLegs = legsByGame.get(row.gameSessionId);
+    if (!gameLegs) {
+      gameLegs = new Map();
+      legsByGame.set(row.gameSessionId, gameLegs);
+    }
+    let leg = gameLegs.get(row.sessionId);
+    if (!leg) {
+      leg = { status: row.status, topPositions: [] };
+      gameLegs.set(row.sessionId, leg);
+    }
+    if (leg.topPositions.length < TOP_PICK_COUNT) {
+      leg.topPositions.push(row.actualPosition);
+    }
+  }
+
+  return games.map((game) => {
+    const gameLegs = legsByGame.get(game.id);
+    let hitsWin = 0;
+    let legsWithResults = 0;
+    if (gameLegs) {
+      for (const leg of gameLegs.values()) {
+        const hit = computeLegHit(leg.topPositions, leg.status);
+        if (hit && hit !== 'pending') legsWithResults++;
+        if (hit === 'win') hitsWin++;
+      }
+    }
+
     return {
-      id: g.id,
-      gameType: g.gameType,
-      date: g.date,
-      trackName: g.trackName,
-      atgTrackId: full.atgTrackId,
-      legCount: full.legCount,
-      tipSubmittedAt: g.tipSubmittedAt,
-      hitsWin: full.hitsWin,
-      legsWithResults: full.legsWithResults,
+      id: game.id,
+      gameType: game.gameType,
+      date: game.date,
+      trackName: game.trackName,
+      atgTrackId: game.atgTrackId,
+      legCount: legCountByGame.get(game.id) ?? 0,
+      tipSubmittedAt: game.tipSubmittedAt,
+      hitsWin,
+      legsWithResults,
     };
   });
 }

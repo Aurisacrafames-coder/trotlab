@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import { atgFetch, driverName } from './atg.js';
 import {
-  backfillTrainerWinPct,
+  backfillTrainerWinPctAsync,
   ensureGlobalTrainerCache,
   refreshSessionTrainerWinPct,
 } from './atgStats.js';
@@ -105,7 +105,7 @@ export async function backfillAllSessionTrainers(db: Database.Database): Promise
   }
 
   await ensureGlobalTrainerCache(db);
-  const { entriesUpdated } = backfillTrainerWinPct(db);
+  const { entriesUpdated } = await backfillTrainerWinPctAsync(db);
 
   return { sessionsUpdated, entriesBackfilled: entriesUpdated };
 }

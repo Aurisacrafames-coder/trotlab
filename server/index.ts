@@ -19,7 +19,13 @@ import {
 import { startStatsSyncJob } from './jobs/syncStats.js';
 import { getAutoOptimizerStatus, scheduleAutoOptimize, startAutoOptimizeJob } from './jobs/autoOptimize.js';
 import { startEarningsRefreshJob } from './jobs/refreshEarnings.js';
-import { listBacktestTracks, normalizeMaxTrials, optimizeWeights, runBacktest } from './backtest.js';
+import {
+  listBacktestGameTypes,
+  listBacktestTracks,
+  normalizeMaxTrials,
+  optimizeWeights,
+  runBacktest,
+} from './backtest.js';
 import { analyzeTrackMisses } from './trackMissAnalysis.js';
 import { buildGameRankingExport } from './rankingExportService.js';
 import { refreshAllGameSessionRaceInfo } from './raceInfoRefresh.js';
@@ -55,7 +61,11 @@ import {
   searchStatEntities,
 } from './statsVerification.js';
 import { accessGate } from './auth.js';
-import { importAllGameLegsFromUrl, persistImportedRace } from './importService.js';
+import {
+  importAllGameLegsFromUrl,
+  importMissingGameLegs,
+  persistImportedRace,
+} from './importService.js';
 import { getImportProgress } from './importProgress.js';
 import { startTrainerBackfillJob } from './trainerRefresh.js';
 import type { BacktestGoal, Parameter, RaceEntry, RaceSession } from '../shared/types.js';
@@ -65,6 +75,10 @@ import { BULK_IMPORT_LOOKBACK_MONTHS, OPTIMIZE_TRIALS_DEFAULT } from '../shared/
 const app = express();
 const PORT = Number(process.env.PORT) || 3847;
 const HOST = process.env.HOST ?? '0.0.0.0';
+const SCRATCH_SYNC_INTERVAL_MS = 60_000;
+/** Auto-opt efter import — fördröjd så API hinner svara direkt efter omgångsimport. */
+const AUTO_OPTIMIZE_AFTER_IMPORT_MS = 120_000;
+const scratchSyncAt = new Map<number, number>();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distPath = path.join(__dirname, '..', 'dist');
 
@@ -101,26 +115,37 @@ async function loadSession(id: number): Promise<RaceSession | null> {
 
   if (!session) return null;
 
+  let needsRecalc = false;
+
   if (sessionNeedsTrainerBackfill(db, id)) {
-    try {
-      await refreshSessionTrainerData(db, id);
-    } catch (err) {
+    void refreshSessionTrainerData(db, id).catch((err) => {
       console.error(`Kunde inte hämta tränare för lopp ${id}:`, err);
-    }
+    });
   } else if (refreshSessionTrainerWinPct(db, id)) {
-    recalculateSessionScores(id);
+    needsRecalc = true;
   }
 
   if (refreshSessionDriverV85WinPct(db, id)) {
-    recalculateSessionScores(id);
+    needsRecalc = true;
   }
 
-  try {
-    if (await refreshSessionScratchStatus(db, id)) {
-      recalculateSessionScores(id);
+  const lastScratchSync = scratchSyncAt.get(id) ?? 0;
+  const shouldSyncScratch =
+    session.status !== 'results' && Date.now() - lastScratchSync > SCRATCH_SYNC_INTERVAL_MS;
+
+  if (shouldSyncScratch) {
+    try {
+      if (await refreshSessionScratchStatus(db, id)) {
+        needsRecalc = true;
+      }
+      scratchSyncAt.set(id, Date.now());
+    } catch (err) {
+      console.error(`Kunde inte synka strykningar för lopp ${id}:`, err);
     }
-  } catch (err) {
-    console.error(`Kunde inte synka strykningar för lopp ${id}:`, err);
+  }
+
+  if (needsRecalc) {
+    recalculateSessionScores(id);
   }
 
   const tipParameters = getSessionTipParameters(db, id);
@@ -243,7 +268,7 @@ app.post('/api/import', async (req, res) => {
     const db = getDb();
     if (allLegs) {
       const result = await importAllGameLegsFromUrl(db, url.trim());
-      scheduleAutoOptimize(db);
+      setTimeout(() => scheduleAutoOptimize(db), AUTO_OPTIMIZE_AFTER_IMPORT_MS);
       const game = loadGameSession(db, result.gameSessionId);
       if (!game) return res.status(500).json({ error: 'Omgången kunde inte laddas efter import' });
       res.json({
@@ -256,7 +281,7 @@ app.post('/api/import', async (req, res) => {
     }
 
     const sessionId = await persistImportedRace(db, url.trim());
-    scheduleAutoOptimize(db);
+    setTimeout(() => scheduleAutoOptimize(getDb()), AUTO_OPTIMIZE_AFTER_IMPORT_MS);
     res.json(await loadSession(sessionId));
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Import misslyckades';
@@ -299,17 +324,19 @@ app.get('/api/track-profiles', (_req, res) => {
 
 app.get('/api/track-profiles/:atgTrackId', (req, res) => {
   const atgTrackId = parseInt(req.params.atgTrackId, 10);
+  const gameType = typeof req.query.gameType === 'string' ? req.query.gameType : '';
   if (Number.isNaN(atgTrackId)) {
     return res.status(400).json({ error: 'Ogiltigt ban-id' });
   }
-  res.json(getTrackProfileOrGlobal(getDb(), atgTrackId));
+  res.json(getTrackProfileOrGlobal(getDb(), atgTrackId, gameType));
 });
 
 app.put('/api/track-profiles/:atgTrackId', (req, res) => {
   const atgTrackId = parseInt(req.params.atgTrackId, 10);
-  const { trackName, parameters } = req.body as {
+  const { trackName, parameters, gameType } = req.body as {
     trackName?: string;
     parameters?: Parameter[];
+    gameType?: string | null;
   };
 
   if (Number.isNaN(atgTrackId)) {
@@ -319,8 +346,8 @@ app.put('/api/track-profiles/:atgTrackId', (req, res) => {
     return res.status(400).json({ error: 'trackName och parameters krävs' });
   }
 
-  saveTrackProfile(getDb(), atgTrackId, trackName.trim(), parameters);
-  res.json(getTrackProfileOrGlobal(getDb(), atgTrackId));
+  saveTrackProfile(getDb(), atgTrackId, trackName.trim(), parameters, gameType ?? '');
+  res.json(getTrackProfileOrGlobal(getDb(), atgTrackId, gameType ?? ''));
 });
 
 app.get('/api/sessions', (_req, res) => {
@@ -601,6 +628,28 @@ app.put('/api/game-sessions/:id/user-system', (req, res) => {
 
   saveUserSystem(db, gameSessionId, body.legs);
   res.json(loadGameSession(db, gameSessionId));
+});
+
+app.post('/api/game-sessions/:id/import-missing-legs', async (req, res) => {
+  const gameSessionId = parseInt(req.params.id, 10);
+  const db = getDb();
+  if (!loadGameSession(db, gameSessionId)) {
+    return res.status(404).json({ error: 'Omgång hittades inte' });
+  }
+
+  try {
+    const result = await importMissingGameLegs(db, gameSessionId);
+    setTimeout(() => scheduleAutoOptimize(db), AUTO_OPTIMIZE_AFTER_IMPORT_MS);
+    const game = loadGameSession(db, gameSessionId)!;
+    if (result.errors.length > 0) {
+      res.status(207).json({ game, ...result });
+      return;
+    }
+    res.json({ game, ...result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Kunde inte importera saknade avdelningar';
+    res.status(500).json({ error: message });
+  }
 });
 
 app.post('/api/game-sessions/:id/refresh-race-info', async (req, res) => {
@@ -950,6 +999,14 @@ app.get('/api/backtest/tracks', (_req, res) => {
   res.json(listBacktestTracks(getDb()));
 });
 
+app.get('/api/backtest/game-types', (req, res) => {
+  const atgTrackId = Number(req.query.atgTrackId);
+  if (!Number.isFinite(atgTrackId)) {
+    return res.status(400).json({ error: 'atgTrackId krävs' });
+  }
+  res.json(listBacktestGameTypes(getDb(), atgTrackId));
+});
+
 app.post('/api/backtest/miss-analysis', (req, res) => {
   const { atgTrackId, goal } = req.body as { atgTrackId?: number; goal?: BacktestGoal };
 
@@ -1005,7 +1062,7 @@ app.post('/api/backtest/optimize', (req, res) => {
     return res.status(400).json({ error: 'goal måste vara win eller top3' });
   }
 
-  const status = getAutoOptimizerStatus(getDb(), atgTrackId);
+  const status = getAutoOptimizerStatus(getDb(), atgTrackId, gameType ?? '');
   if (status.running) {
     return res.status(409).json({ error: 'Optimering pågår redan — vänta tills den är klar.' });
   }
@@ -1015,15 +1072,16 @@ app.post('/api/backtest/optimize', (req, res) => {
     goal,
     atgTrackId,
     normalizeMaxTrials(maxTrials),
-    { allowLargeTrack: true },
+    { allowLargeTrack: true, gameType: gameType ?? '', startMethod: startMethod ?? undefined },
   );
-  res.json(getAutoOptimizerStatus(getDb(), atgTrackId));
+  res.json(getAutoOptimizerStatus(getDb(), atgTrackId, gameType ?? ''));
 });
 
 app.get('/api/backtest/auto', (req, res) => {
   const atgTrackId = req.query.atgTrackId ? Number(req.query.atgTrackId) : undefined;
   const filterTrackId = Number.isFinite(atgTrackId) ? atgTrackId : undefined;
-  res.json(getAutoOptimizerStatus(getDb(), filterTrackId));
+  const gameType = typeof req.query.gameType === 'string' ? req.query.gameType : undefined;
+  res.json(getAutoOptimizerStatus(getDb(), filterTrackId, gameType));
 });
 
 app.post('/api/backtest/auto/run', (req, res) => {
@@ -1063,13 +1121,6 @@ if (fs.existsSync(path.join(distPath, 'index.html'))) {
 app.listen(PORT, HOST, () => {
   const db = getDb();
   resetStaleBulkImportStatus(db);
-  const driverBackfill = backfillDriverV85WinPct(db);
-  if (driverBackfill.entriesUpdated > 0) {
-    console.log(`Kusk %: ${driverBackfill.entriesUpdated} rader synkade från cache`);
-    for (const sessionId of driverBackfill.sessionIds) {
-      recalculateSessionScores(sessionId);
-    }
-  }
   startStatsSyncJob(() => db);
   startTrainerBackfillJob(() => db);
   startAutoOptimizeJob(() => db);
@@ -1082,4 +1133,16 @@ app.listen(PORT, HOST, () => {
   for (const ip of getLanAddresses()) {
     console.log(`Mobil i samma nätverk: http://${ip}:${PORT}`);
   }
+
+  setImmediate(() => {
+    const driverBackfill = backfillDriverV85WinPct(db);
+    if (driverBackfill.entriesUpdated === 0) return;
+    console.log(`Kusk %: ${driverBackfill.entriesUpdated} rader synkade från cache`);
+    void (async () => {
+      for (const sessionId of driverBackfill.sessionIds) {
+        recalculateSessionScores(sessionId);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    })();
+  });
 });

@@ -1,4 +1,10 @@
-import { TRACK_DISPLAY_NAMES, TRACK_SLUGS } from './tracks.js';
+import { getTrackSlugById, TRACK_DISPLAY_NAMES, TRACK_SLUGS } from './tracks.js';
+
+export interface CalendarGameRef {
+  id?: string;
+  races?: string[];
+  tracks?: number[];
+}
 
 export interface GameVenue {
   venueSlug: string;
@@ -61,4 +67,74 @@ export function venueMatchesGameTracks(venue: GameVenue, gameTracks: number[] | 
   if (gameTracks.length !== venue.trackIds.length) return false;
   const trackSet = new Set(gameTracks);
   return venue.trackIds.every((id) => trackSet.has(id));
+}
+
+function venueFromTrackIds(trackIds: number[]): GameVenue {
+  const slugs: string[] = [];
+  const names: string[] = [];
+  for (const id of trackIds) {
+    const slug = getTrackSlugById(id);
+    if (!slug) continue;
+    slugs.push(slug);
+    names.push(TRACK_DISPLAY_NAMES[slug] ?? slug);
+  }
+  if (slugs.length === 0) {
+    return {
+      venueSlug: trackIds.join('-'),
+      trackIds: [...trackIds],
+      displayName: trackIds.map(String).join(' / '),
+      isMultiTrack: trackIds.length > 1,
+    };
+  }
+  return {
+    venueSlug: slugs.join('-'),
+    trackIds: [...trackIds],
+    displayName: names.join(' / '),
+    isMultiTrack: trackIds.length > 1,
+  };
+}
+
+/** När länken bara nämner en bana men ATG-spelet är multibana (t.ex. V4 Halmstad + Bjerke). */
+export function alignVenueWithCalendarGame(urlVenue: GameVenue, game: CalendarGameRef): GameVenue {
+  const gameTracks = game.tracks;
+  if (!gameTracks?.length) return urlVenue;
+  if (venueMatchesGameTracks(urlVenue, gameTracks)) return urlVenue;
+  if (!urlVenue.isMultiTrack && gameTracks.includes(urlVenue.trackIds[0]!)) {
+    return venueFromTrackIds(gameTracks);
+  }
+  return urlVenue;
+}
+
+export function findCalendarGameForVenue(
+  games: CalendarGameRef[],
+  venue: GameVenue,
+): CalendarGameRef | undefined {
+  const byTracks = games.find((game) => venueMatchesGameTracks(venue, game.tracks));
+  if (byTracks) return byTracks;
+
+  if (!venue.isMultiTrack) {
+    const trackId = venue.trackIds[0];
+
+    const singleTrackGames = games.filter(
+      (g) => g.tracks?.length === 1 && g.tracks[0] === trackId,
+    );
+    if (singleTrackGames.length === 1) return singleTrackGames[0];
+    if (singleTrackGames.length > 1) {
+      return (
+        singleTrackGames.find((g) => g.id?.includes(`_${trackId}_`)) ?? singleTrackGames[0]
+      );
+    }
+
+    const multiTrackGames = games.filter(
+      (g) => (g.tracks?.length ?? 0) > 1 && g.tracks?.includes(trackId),
+    );
+    if (multiTrackGames.length === 1) return multiTrackGames[0];
+    if (multiTrackGames.length > 1) {
+      return multiTrackGames.find((g) => g.id?.includes(`_${trackId}_`)) ?? multiTrackGames[0];
+    }
+
+    return games.find((g) => g.id?.includes(`_${trackId}_`));
+  }
+
+  return undefined;
 }

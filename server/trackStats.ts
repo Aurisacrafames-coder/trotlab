@@ -43,16 +43,13 @@ export function resolveTrackName(db: Database.Database, atgTrackId: number): str
 function queryTrackStats(db: Database.Database): BacktestTrackOption[] {
   const rows = db
     .prepare(
-      `SELECT rs.atg_track_id as atgTrackId,
-              MIN(rs.track_name) as trackName,
-              COUNT(DISTINCT rs.id) as raceCount,
-              COUNT(DISTINCT CASE
-                WHEN re.actual_position IS NOT NULL AND re.actual_position > 0 THEN rs.id
-              END) as racesWithResult
-       FROM race_sessions rs
-       LEFT JOIN race_entries re ON re.session_id = rs.id
-       WHERE rs.atg_track_id IS NOT NULL
-       GROUP BY rs.atg_track_id
+      `SELECT atg_track_id as atgTrackId,
+              MIN(track_name) as trackName,
+              COUNT(*) as raceCount,
+              SUM(CASE WHEN status = 'results' THEN 1 ELSE 0 END) as racesWithResult
+       FROM race_sessions
+       WHERE atg_track_id IS NOT NULL
+       GROUP BY atg_track_id
        ORDER BY racesWithResult DESC, trackName`,
     )
     .all() as Array<{

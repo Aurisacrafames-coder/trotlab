@@ -6,7 +6,16 @@ import {
   finishImportProgress,
   updateImportProgress,
 } from './importProgress.js';
-import { ensureGlobalTrainerCache, ensureTrackPostStatsForTrack, getDriverGlobalWinPercentCached, getDriverTrackWinPercentCached, getTrainerWinPercentCached, getTrackPostWinPercentCached, prefetchImportStats } from './atgStats.js';
+import {
+  ensureGlobalTrainerCache,
+  ensureTrackPostStatsForTrack,
+  getDriverGlobalWinPercentCached,
+  getDriverTrackWinPercentCached,
+  getTrainerWinPercentCached,
+  getTrackPostWinPercentCached,
+  prefetchImportStats,
+  prefetchImportStatsForSessions,
+} from './atgStats.js';
 import { findOrCreateGameSession, linkRaceToGameSession } from './gameSessions.js';
 import { recalculateSessionScores } from './sessionScores.js';
 import { invalidateTrackStatsCache } from './trackStats.js';
@@ -130,7 +139,7 @@ export async function discoverTrackLegsForRange(options: {
     for (const gameType of gameTypes) {
       const games = calendar.games?.[gameType] ?? calendar.games?.[gameType.toUpperCase()] ?? [];
       for (const game of games) {
-        if (!game.id.includes(`_${trackId}_`)) continue;
+        if (!game.id.includes(`_${trackId}_`) && !game.tracks?.includes(trackId)) continue;
 
         for (let leg = 1; leg <= game.races.length; leg++) {
           const raceId = game.races[leg - 1];
@@ -212,6 +221,94 @@ export async function discoverGameLegsFromUrl(sourceUrl: string): Promise<LegImp
   }));
 }
 
+export async function importMissingGameLegs(
+  db: Database.Database,
+  gameSessionId: number,
+): Promise<{ imported: number; expectedLegs: number; errors: string[] }> {
+  const row = db
+    .prepare(
+      `SELECT game_type as gameType, date, venue_slug as venueSlug, atg_game_id as atgGameId
+       FROM game_sessions WHERE id = ?`,
+    )
+    .get(gameSessionId) as
+    | { gameType: string; date: string; venueSlug: string | null; atgGameId: string | null }
+    | undefined;
+
+  if (!row?.atgGameId) {
+    throw new Error('Omgången saknar ATG-spel-id — importera hela omgången från länk.');
+  }
+
+  const atgGame = await atgFetch<{ races: string[] }>(`/games/${row.atgGameId}`);
+  const raceIds = atgGame.races ?? [];
+  if (raceIds.length === 0) {
+    throw new Error('Kunde inte läsa avdelningar från ATG för denna omgång.');
+  }
+
+  const existing = new Set(
+    (
+      db
+        .prepare(`SELECT atg_race_id as atgRaceId FROM race_sessions WHERE game_session_id = ?`)
+        .all(gameSessionId) as Array<{ atgRaceId: string }>
+    ).map((r) => r.atgRaceId),
+  );
+
+  const slug = row.venueSlug ?? 'solvalla';
+  const gameType = row.gameType.toLowerCase();
+
+  const errors: string[] = [];
+  let imported = 0;
+  const importedSessionIds: number[] = [];
+
+  beginImportProgress(raceIds.length, `Hämtar saknade avdelningar (${row.gameType})`);
+
+  try {
+    for (let index = 0; index < raceIds.length; index++) {
+      const raceId = raceIds[index];
+      if (existing.has(raceId)) continue;
+
+      const leg = index + 1;
+      updateImportProgress({
+        currentLeg: leg,
+        importedLegs: imported,
+        phase: `Avd ${leg} av ${raceIds.length} — saknad avdelning`,
+      });
+
+      const url = `https://www.atg.se/spel/${gameType}/${row.date}/${slug}/avd/${leg}`;
+      try {
+        const sessionId = await persistImportedRace(db, url, {
+          gameSessionId,
+          skipStatsWarmup: true,
+        });
+        importedSessionIds.push(sessionId);
+        imported++;
+        existing.add(raceId);
+        updateImportProgress({ importedLegs: imported });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        errors.push(`Avd ${leg}: ${message}`);
+      }
+    }
+
+    if (importedSessionIds.length > 0) {
+      const trackIds = (
+        db
+          .prepare(
+            `SELECT DISTINCT atg_track_id as atgTrackId
+             FROM race_sessions WHERE id IN (${importedSessionIds.map(() => '?').join(',')})
+               AND atg_track_id IS NOT NULL`,
+          )
+          .all(...importedSessionIds) as Array<{ atgTrackId: number }>
+      ).map((r) => r.atgTrackId);
+      prefetchImportStatsForSessions(db, trackIds, importedSessionIds);
+    }
+
+    finishImportProgress(imported);
+    return { imported, expectedLegs: raceIds.length, errors };
+  } finally {
+    setTimeout(() => clearImportProgress(), 8000);
+  }
+}
+
 export async function importAllGameLegsFromUrl(
   db: Database.Database,
   sourceUrl: string,
@@ -238,7 +335,7 @@ export async function importAllGameLegsFromUrl(
 
   let imported = 0;
   const errors: string[] = [];
-  const warmedTrackIds = new Set<number>();
+  const importedSessionIds: number[] = [];
 
   try {
     for (const target of targets) {
@@ -249,7 +346,11 @@ export async function importAllGameLegsFromUrl(
       });
 
       try {
-        await persistImportedRace(db, target.url, { gameSessionId, skipStatsWarmup: true });
+        const sessionId = await persistImportedRace(db, target.url, {
+          gameSessionId,
+          skipStatsWarmup: true,
+        });
+        importedSessionIds.push(sessionId);
         imported++;
         updateImportProgress({ importedLegs: imported });
       } catch (err) {
@@ -266,18 +367,16 @@ export async function importAllGameLegsFromUrl(
       );
     }
 
-    const trackIds = db
-      .prepare(
-        `SELECT DISTINCT atg_track_id as atgTrackId
-         FROM race_sessions WHERE game_session_id = ? AND atg_track_id IS NOT NULL`,
-      )
-      .all(gameSessionId) as Array<{ atgTrackId: number }>;
-    for (const row of trackIds) {
-      if (!warmedTrackIds.has(row.atgTrackId)) {
-        warmedTrackIds.add(row.atgTrackId);
-        prefetchImportStats(row.atgTrackId, [], db);
-      }
-    }
+    const trackIds = (
+      db
+        .prepare(
+          `SELECT DISTINCT atg_track_id as atgTrackId
+           FROM race_sessions WHERE game_session_id = ? AND atg_track_id IS NOT NULL`,
+        )
+        .all(gameSessionId) as Array<{ atgTrackId: number }>
+    ).map((row) => row.atgTrackId);
+
+    prefetchImportStatsForSessions(db, trackIds, importedSessionIds);
 
     finishImportProgress(imported);
     return { gameSessionId, imported, total: targets.length, errors };
@@ -294,21 +393,6 @@ export async function persistImportedRace(
   const imported = await importFromUrl(sourceUrl.trim(), {
     startFetchConcurrency: options?.skipStatsWarmup ? 6 : 5,
   });
-
-  if (!options?.skipStatsWarmup) {
-    prefetchImportStats(imported.atgTrackId, [], db);
-  }
-
-  if (!options?.skipStatsWarmup) {
-    if (imported.atgTrackId != null) {
-      const hasDriverTrack = db
-        .prepare('SELECT 1 as ok FROM driver_track_win_stats WHERE track_id = ? LIMIT 1')
-        .get(imported.atgTrackId) as { ok: number } | undefined;
-      await ensureTrackPostStatsForTrack(db, imported.atgTrackId, !hasDriverTrack);
-    }
-
-    await ensureGlobalTrainerCache(db);
-  }
 
   for (const entry of imported.entries) {
     if (entry.atgDriverId != null) {
@@ -416,6 +500,10 @@ export async function persistImportedRace(
 
   recalculateSessionScores(db, sessionId);
 
+  if (!options?.skipStatsWarmup && imported.atgTrackId != null) {
+    prefetchImportStats(imported.atgTrackId, [], db, sessionId);
+  }
+
   if (options?.gameSessionId != null) {
     linkRaceToGameSession(db, sessionId, options.gameSessionId);
   } else {
@@ -469,11 +557,17 @@ export async function bulkImportTrackLegs(
   const errors: string[] = [];
 
   if (options?.atgTrackId != null) {
+    const trackId = options.atgTrackId;
     const hasDriverTrack = db
       .prepare('SELECT 1 as ok FROM driver_track_win_stats WHERE track_id = ? LIMIT 1')
-      .get(options.atgTrackId) as { ok: number } | undefined;
-    await ensureTrackPostStatsForTrack(db, options.atgTrackId, !hasDriverTrack);
-    await ensureGlobalTrainerCache(db);
+      .get(trackId) as { ok: number } | undefined;
+    // Warm stats in background — blocking here scans ~1 year of ATG before the first leg.
+    void ensureTrackPostStatsForTrack(db, trackId, !hasDriverTrack).catch((err) =>
+      console.error(`Banstatistik för track ${trackId} misslyckades:`, err),
+    );
+    void ensureGlobalTrainerCache(db).catch((err) =>
+      console.error('Tränarcache misslyckades:', err),
+    );
   }
 
   for (let i = 0; i < targets.length; i++) {
@@ -493,14 +587,12 @@ export async function bulkImportTrackLegs(
       imported++;
       onProgress?.(i + 1, targets.length, target, { imported, skipped });
       await sleep(250);
+      await new Promise<void>((resolve) => setImmediate(resolve));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       errors.push(`${target.date} ${target.gameType} avd ${target.leg}: ${message}`);
       onProgress?.(i + 1, targets.length, target, { imported, skipped }, message);
       await sleep(250);
-    }
-
-    if ((i + 1) % 5 === 0) {
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
   }

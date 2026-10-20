@@ -10,6 +10,8 @@ import {
 
   recalculateGame,
 
+  importMissingGameLegs,
+
   refreshGameRaceInfo,
 
   restoreGameTip,
@@ -676,6 +678,38 @@ export default function GamePage() {
             {busy ? 'Hämtar…' : 'Hämta alla resultat'}
 
           </button>
+
+          {game.atgGameId && (
+            <button
+              type="button"
+              className="secondary"
+              onClick={async () => {
+                setBusy(true);
+                setError(null);
+                setMessage(null);
+                try {
+                  const result = await importMissingGameLegs(game.id);
+                  setGame(result.game);
+                  if (result.errors.length > 0) {
+                    setError(
+                      `Importerade ${result.imported} avdelning(ar). ${result.errors.slice(0, 2).join(' · ')}`,
+                    );
+                  } else if (result.imported > 0) {
+                    setMessage(`Importerade ${result.imported} saknade avdelningar (nu ${result.game.legCount} avd).`);
+                  } else {
+                    setMessage('Alla avdelningar fanns redan.');
+                  }
+                } catch (e) {
+                  setError(e instanceof Error ? e.message : 'Kunde inte hämta saknade avdelningar');
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              disabled={busy}
+            >
+              Hämta saknade avdelningar
+            </button>
+          )}
 
           {missingRaceInfo && (
 

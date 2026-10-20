@@ -1,4 +1,5 @@
 import { analyzeRaceTerms, type RaceTermFlags } from './raceTerms.js';
+import { matchTravLeagueClasses } from './travLeagueClasses.js';
 
 export interface RaceProfile {
   flags: RaceTermFlags;
@@ -8,18 +9,12 @@ export interface RaceProfile {
   summary: string;
 }
 
-function divisionTags(raceName: string | null): string[] {
-  if (!raceName) return [];
-  const name = raceName.toLowerCase();
-  const tags: string[] = [];
+function divisionTags(raceName: string | null, terms: string[]): string[] {
+  const tags = matchTravLeagueClasses(raceName, terms);
+  const name = (raceName ?? '').toLowerCase();
 
-  if (/klass\s*i\b/i.test(raceName) && !/klass\s*ii/i.test(raceName)) tags.push('Klass I');
-  if (/bronsdivision/i.test(name)) tags.push('Bronsdivisionen');
-  if (/silverdivision/i.test(name)) tags.push('Silverdivisionen');
-  if (/gulddivision/i.test(name)) tags.push('Gulddivisionen');
-  if (/stodivision/i.test(name)) tags.push('Stodivisionen');
-  if (/fyraåringslopp|4-åringslopp/i.test(name)) tags.push('Fyraåringslopp');
-  if (/femåringslopp|5-åringslopp/i.test(name)) tags.push('Femåringslopp');
+  if (/fyraåringslopp|4-åringslopp/i.test(raceName ?? '')) tags.push('Fyraåringslopp');
+  if (/femåringslopp|5-åringslopp/i.test(raceName ?? '')) tags.push('Femåringslopp');
   if (/stayer|stayers/i.test(name)) tags.push('Stayerlopp');
 
   return tags;
@@ -33,7 +28,7 @@ export function classifyRaceProfile(
 ): RaceProfile {
   const flags = analyzeRaceTerms(terms);
   const text = terms.join(' ').toLowerCase();
-  const tags: string[] = [...divisionTags(raceName)];
+  const tags: string[] = [...divisionTags(raceName, terms)];
 
   if (flags.mareRace) tags.push('Stolopp');
   if (flags.youngAgeRace === '3') tags.push('3-års lopp');

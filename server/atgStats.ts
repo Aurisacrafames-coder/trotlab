@@ -217,6 +217,7 @@ async function computeTrackStatsFromAtg(
   const byDriver = new Map<number, DriverCounts>();
 
   for (const date of dateRange(fromDate, today)) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
     let calendar: CalendarDay;
     try {
       calendar = await atgFetch<CalendarDay>(`/calendar/day/${date}`);
@@ -423,6 +424,131 @@ export function backfillTrackPostWinPct(db: Database.Database): number {
   return updated;
 }
 
+function sessionIdPlaceholders(sessionIds: number[]): string {
+  return sessionIds.map(() => '?').join(',');
+}
+
+export function backfillTrackPostWinPctForSessions(
+  db: Database.Database,
+  sessionIds: number[],
+): number {
+  if (sessionIds.length === 0) return 0;
+  const sessions = db
+    .prepare(
+      `SELECT id, atg_track_id as atgTrackId, start_method as startMethod
+       FROM race_sessions
+       WHERE id IN (${sessionIdPlaceholders(sessionIds)}) AND atg_track_id IS NOT NULL`,
+    )
+    .all(...sessionIds) as Array<{ id: number; atgTrackId: number; startMethod: string | null }>;
+
+  const update = db.prepare('UPDATE race_entries SET track_post_win_pct = ? WHERE id = ?');
+  let updated = 0;
+
+  for (const session of sessions) {
+    const entries = db
+      .prepare(
+        `SELECT id, post_position as postPosition, volte_row as volteRow
+         FROM race_entries WHERE session_id = ?`,
+      )
+      .all(session.id) as Array<{ id: number; postPosition: number | null; volteRow: string | null }>;
+
+    for (const entry of entries) {
+      const pct = getTrackPostWinPercentCached(
+        session.atgTrackId,
+        entry.postPosition,
+        session.startMethod,
+        db,
+        entry.volteRow === 'front' || entry.volteRow === 'back' ? entry.volteRow : null,
+      );
+      update.run(pct, entry.id);
+      updated++;
+    }
+  }
+
+  return updated;
+}
+
+export function backfillDriverWinPctForSessions(
+  db: Database.Database,
+  sessionIds: number[],
+): { entriesUpdated: number; sessionIds: number[] } {
+  if (sessionIds.length === 0) return { entriesUpdated: 0, sessionIds: [] };
+
+  const entries = db
+    .prepare(
+      `SELECT re.id, re.session_id as sessionId, re.atg_driver_id as atgDriverId,
+              re.driver_track_win_pct as currentTrackPct,
+              re.driver_global_win_pct as currentGlobalPct,
+              rs.atg_track_id as atgTrackId
+       FROM race_entries re
+       JOIN race_sessions rs ON rs.id = re.session_id
+       WHERE re.session_id IN (${sessionIdPlaceholders(sessionIds)})
+         AND re.atg_driver_id IS NOT NULL AND re.driver_v85_win_pct_override IS NULL`,
+    )
+    .all(...sessionIds) as Array<{
+    id: number;
+    sessionId: number;
+    atgDriverId: number;
+    currentTrackPct: number | null;
+    currentGlobalPct: number | null;
+    atgTrackId: number | null;
+  }>;
+
+  const update = db.prepare(
+    `UPDATE race_entries SET driver_track_win_pct = ?, driver_global_win_pct = ? WHERE id = ?`,
+  );
+  const affectedSessions = new Set<number>();
+  let entriesUpdated = 0;
+
+  for (const entry of entries) {
+    const trackPct = getDriverTrackWinPercentCached(entry.atgDriverId, entry.atgTrackId, db);
+    const globalPct = getDriverGlobalWinPercentCached(entry.atgDriverId, db);
+    if (trackPct === entry.currentTrackPct && globalPct === entry.currentGlobalPct) continue;
+    update.run(trackPct, globalPct, entry.id);
+    entriesUpdated++;
+    affectedSessions.add(entry.sessionId);
+  }
+
+  return { entriesUpdated, sessionIds: [...affectedSessions] };
+}
+
+export function backfillTrainerWinPctForSessions(
+  db: Database.Database,
+  sessionIds: number[],
+): { entriesUpdated: number; sessionIds: number[] } {
+  if (sessionIds.length === 0) return { entriesUpdated: 0, sessionIds: [] };
+
+  const entries = db
+    .prepare(
+      `SELECT re.id, re.session_id as sessionId, re.atg_trainer_id as atgTrainerId,
+              re.trainer_win_pct as currentPct
+       FROM race_entries re
+       WHERE re.session_id IN (${sessionIdPlaceholders(sessionIds)})
+         AND re.atg_trainer_id IS NOT NULL AND re.trainer_win_pct_override IS NULL`,
+    )
+    .all(...sessionIds) as Array<{
+    id: number;
+    sessionId: number;
+    atgTrainerId: number;
+    currentPct: number | null;
+  }>;
+
+  const update = db.prepare('UPDATE race_entries SET trainer_win_pct = ? WHERE id = ?');
+  const affectedSessions = new Set<number>();
+  let entriesUpdated = 0;
+
+  for (const entry of entries) {
+    const pct = getTrainerWinPercentCached(entry.atgTrainerId, db);
+    if (pct === entry.currentPct) continue;
+    update.run(pct, entry.id);
+    entriesUpdated++;
+    affectedSessions.add(entry.sessionId);
+  }
+
+  return { entriesUpdated, sessionIds: [...affectedSessions] };
+}
+
+/** @deprecated Use backfillDriverWinPctForSessions when scope is known */
 export function backfillDriverV85WinPct(db: Database.Database): {
   entriesUpdated: number;
   sessionIds: number[];
@@ -536,6 +662,43 @@ export function backfillTrainerWinPct(db: Database.Database): {
     update.run(pct, entry.id);
     entriesUpdated++;
     affectedSessions.add(entry.sessionId);
+  }
+
+  return { entriesUpdated, sessionIds: [...affectedSessions] };
+}
+
+export async function backfillTrainerWinPctAsync(
+  db: Database.Database,
+  batchSize = 400,
+): Promise<{ entriesUpdated: number; sessionIds: number[] }> {
+  const entries = db
+    .prepare(
+      `SELECT re.id, re.session_id as sessionId, re.atg_trainer_id as atgTrainerId,
+              re.trainer_win_pct as currentPct
+       FROM race_entries re
+       WHERE re.atg_trainer_id IS NOT NULL AND re.trainer_win_pct_override IS NULL`,
+    )
+    .all() as Array<{
+    id: number;
+    sessionId: number;
+    atgTrainerId: number;
+    currentPct: number | null;
+  }>;
+
+  const update = db.prepare('UPDATE race_entries SET trainer_win_pct = ? WHERE id = ?');
+  const affectedSessions = new Set<number>();
+  let entriesUpdated = 0;
+
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    const pct = getTrainerWinPercentCached(entry.atgTrainerId, db);
+    if (pct === entry.currentPct) continue;
+    update.run(pct, entry.id);
+    entriesUpdated++;
+    affectedSessions.add(entry.sessionId);
+    if (i > 0 && i % batchSize === 0) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
   }
 
   return { entriesUpdated, sessionIds: [...affectedSessions] };
@@ -813,21 +976,83 @@ export async function getTrackPostWinPercent(
   return getTrackPostWinPercentCached(trackId, postPosition, startMethod, db, volteRow);
 }
 
+const importStatsWarmup = {
+  timer: null as ReturnType<typeof setTimeout> | null,
+  trackIds: new Set<number>(),
+  sessionIds: new Set<number>(),
+};
+
+const IMPORT_STATS_WARMUP_DELAY_MS = 5_000;
+
+async function runImportStatsWarmup(
+  db: Database.Database,
+  trackIds: number[],
+  sessionIds: number[],
+): Promise<void> {
+  if (trackIds.length === 0 && sessionIds.length === 0) return;
+
+  try {
+    await ensureGlobalDriverCache(db);
+    await ensureGlobalTrainerCache(db);
+
+    if (sessionIds.length > 0) {
+      const driverBackfill = backfillDriverWinPctForSessions(db, sessionIds);
+      const trainerBackfill = backfillTrainerWinPctForSessions(db, sessionIds);
+      backfillTrackPostWinPctForSessions(db, sessionIds);
+      recalculateSessions(
+        db,
+        [
+          ...new Set([
+            ...sessionIds,
+            ...driverBackfill.sessionIds,
+            ...trainerBackfill.sessionIds,
+          ]),
+        ],
+      );
+    }
+
+    for (const trackId of trackIds) {
+      await ensureTrackPostStatsForTrack(db, trackId);
+      if (sessionIds.length > 0) {
+        backfillTrackPostWinPctForSessions(db, sessionIds);
+        recalculateSessions(db, sessionIds);
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  } catch (err) {
+    console.error('Import stats warmup misslyckades:', err);
+  }
+}
+
+function scheduleImportStatsWarmup(db: Database.Database): void {
+  if (importStatsWarmup.timer) clearTimeout(importStatsWarmup.timer);
+  importStatsWarmup.timer = setTimeout(() => {
+    importStatsWarmup.timer = null;
+    const trackIds = [...importStatsWarmup.trackIds];
+    const sessionIds = [...importStatsWarmup.sessionIds];
+    importStatsWarmup.trackIds.clear();
+    importStatsWarmup.sessionIds.clear();
+    void runImportStatsWarmup(db, trackIds, sessionIds);
+  }, IMPORT_STATS_WARMUP_DELAY_MS);
+}
+
 export function prefetchImportStats(
   trackId: number,
   _driverIds: number[],
   db: Database.Database,
+  sessionId?: number,
 ): void {
-  scheduleBackgroundStatsSync(db);
-  void ensureTrackPostStatsForTrack(db, trackId).then(async () => {
-    backfillTrackPostWinPct(db);
-    await ensureGlobalDriverCache(db);
-    await ensureGlobalTrainerCache(db);
-    const driverBackfill = backfillDriverV85WinPct(db);
-    const trainerBackfill = backfillTrainerWinPct(db);
-    recalculateSessions(
-      db,
-      [...new Set([...driverBackfill.sessionIds, ...trainerBackfill.sessionIds])],
-    );
-  });
+  importStatsWarmup.trackIds.add(trackId);
+  if (sessionId != null) importStatsWarmup.sessionIds.add(sessionId);
+  scheduleImportStatsWarmup(db);
+}
+
+export function prefetchImportStatsForSessions(
+  db: Database.Database,
+  trackIds: number[],
+  sessionIds: number[],
+): void {
+  for (const trackId of trackIds) importStatsWarmup.trackIds.add(trackId);
+  for (const sessionId of sessionIds) importStatsWarmup.sessionIds.add(sessionId);
+  scheduleImportStatsWarmup(db);
 }

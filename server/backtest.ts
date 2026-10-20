@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import { calculateTrotScore, evaluateTopPicksHit, isTopPicksHit, TOP_PICK_COUNT } from '../shared/scoring.js';
 import type {
+  BacktestGameTypeOption,
   BacktestGoal,
   BacktestOptimizeResult,
   BacktestRaceDetail,
@@ -8,6 +9,7 @@ import type {
   BacktestTrackOption,
   Parameter,
 } from '../shared/types.js';
+import { normalizeProfileGameType } from '../shared/trackProfileGameTypes.js';
 import { OPTIMIZE_TRIALS_DEFAULT, VARMNING_PARAMETER_ID } from '../shared/types.js';
 import { listTrackStats, resolveTrackName } from './trackStats.js';
 
@@ -289,9 +291,10 @@ function loadSessions(db: Database.Database, filter: BacktestFilter): SessionRow
     sql += ` AND start_method = ?`;
     args.push(filter.startMethod);
   }
-  if (filter.gameType) {
+  const gameType = normalizeProfileGameType(filter.gameType);
+  if (gameType) {
     sql += ` AND game_type = ?`;
-    args.push(filter.gameType);
+    args.push(gameType);
   }
   if (filter.gameSessionId != null) {
     sql += ` AND game_session_id = ?`;
@@ -490,6 +493,33 @@ export function listBacktestTracks(db: Database.Database): BacktestTrackOption[]
   return listTrackStats(db);
 }
 
+export function listBacktestGameTypes(
+  db: Database.Database,
+  atgTrackId: number,
+): BacktestGameTypeOption[] {
+  const rows = db
+    .prepare(
+      `SELECT game_type as gameType,
+              COUNT(*) as raceCount,
+              SUM(CASE WHEN status = 'results' THEN 1 ELSE 0 END) as racesWithResult
+       FROM race_sessions
+       WHERE atg_track_id = ?
+       GROUP BY game_type
+       ORDER BY game_type`,
+    )
+    .all(atgTrackId) as Array<{
+    gameType: string;
+    raceCount: number;
+    racesWithResult: number | null;
+  }>;
+
+  return rows.map((row) => ({
+    gameType: row.gameType,
+    raceCount: row.raceCount,
+    racesWithResult: row.racesWithResult ?? 0,
+  }));
+}
+
 export function runBacktest(
   db: Database.Database,
   parameters: Parameter[],
@@ -649,10 +679,13 @@ export async function optimizeWeights(
   const improved = compareBacktests(best, baselineFull) > 0;
   const usedAllTrials = state.trialsRun >= state.maxTrials;
 
+  const optimizedGameType = normalizeProfileGameType(filter.gameType);
+
   return {
     goal,
     atgTrackId: filter.atgTrackId,
     trackName,
+    gameType: optimizedGameType || undefined,
     racesWithResult: baselineFull.racesWithResult,
     baseline: stripMargin(baselineFull),
     optimized: {

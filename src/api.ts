@@ -1,5 +1,6 @@
 import type {
   AutoOptimizerStatus,
+  BacktestGameTypeOption,
   BacktestGoal,
   BacktestOptimizeResult,
   BacktestSummary,
@@ -254,6 +255,8 @@ export const syncTrackStats = () =>
   });
 
 export const fetchBacktestTracks = () => api<BacktestTrackOption[]>('/backtest/tracks');
+export const fetchBacktestGameTypes = (atgTrackId: number) =>
+  api<BacktestGameTypeOption[]>(`/backtest/game-types?atgTrackId=${atgTrackId}`);
 export const fetchTrackMissAnalysis = (body: { atgTrackId: number; goal: BacktestGoal }) =>
   api<TrackMissAnalysis>('/backtest/miss-analysis', { method: 'POST', body: JSON.stringify(body) });
 export const runBacktest = (body: {
@@ -291,10 +294,13 @@ export const optimizeGameSessionBacktest = (
     body: JSON.stringify(body),
   });
 
-export const fetchAutoOptimizerStatus = (atgTrackId?: number) =>
-  api<AutoOptimizerStatus>(
-    `/backtest/auto${atgTrackId != null ? `?atgTrackId=${atgTrackId}` : ''}`,
-  );
+export const fetchAutoOptimizerStatus = (atgTrackId?: number, gameType?: string | null) => {
+  const params = new URLSearchParams();
+  if (atgTrackId != null) params.set('atgTrackId', String(atgTrackId));
+  if (gameType != null && gameType !== '') params.set('gameType', gameType);
+  const q = params.toString();
+  return api<AutoOptimizerStatus>(`/backtest/auto${q ? `?${q}` : ''}`);
+};
 export const runAutoOptimizer = (
   goal: BacktestGoal = DEFAULT_BACKTEST_GOAL,
   atgTrackId?: number,
@@ -307,12 +313,22 @@ export const runAutoOptimizer = (
 
 export const fetchKnownTracks = () => api<KnownTrack[]>('/tracks/known');
 export const fetchTrackProfiles = () => api<TrackProfileSummary[]>('/track-profiles');
-export const fetchTrackProfile = (atgTrackId: number) =>
-  api<Parameter[]>(`/track-profiles/${atgTrackId}`);
-export const saveTrackProfile = (atgTrackId: number, trackName: string, parameters: Parameter[]) =>
+export const fetchTrackProfile = (atgTrackId: number, gameType: string = '') => {
+  const q =
+    gameType !== ''
+      ? `?gameType=${encodeURIComponent(gameType)}`
+      : '';
+  return api<Parameter[]>(`/track-profiles/${atgTrackId}${q}`);
+};
+export const saveTrackProfile = (
+  atgTrackId: number,
+  trackName: string,
+  parameters: Parameter[],
+  gameType: string = '',
+) =>
   api<Parameter[]>(`/track-profiles/${atgTrackId}`, {
     method: 'PUT',
-    body: JSON.stringify({ trackName, parameters }),
+    body: JSON.stringify({ trackName, parameters, gameType }),
   });
 
 export const fetchBulkImportStatus = () => api<BulkImportStatus>('/import/bulk/status');
@@ -351,6 +367,29 @@ export const refreshGameRaceInfo = (id: number) =>
     method: 'POST',
     body: '{}',
   });
+
+export async function importMissingGameLegs(id: number): Promise<{
+  game: GameSession;
+  imported: number;
+  expectedLegs: number;
+  errors: string[];
+}> {
+  const res = await fetch(`/api/game-sessions/${id}/import-missing-legs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  const data = await res.json();
+  if (!res.ok && res.status !== 207) {
+    throw new Error(data.error ?? 'Kunde inte importera saknade avdelningar');
+  }
+  return data as {
+    game: GameSession;
+    imported: number;
+    expectedLegs: number;
+    errors: string[];
+  };
+}
 export const submitGameTip = (id: number) =>
   api<GameSession>(`/game-sessions/${id}/submit-tip`, { method: 'POST', body: '{}' });
 export const recalculateGame = (id: number, useGlobal = false) =>

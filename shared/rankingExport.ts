@@ -2,6 +2,9 @@ import type { GameSession, GameSessionLeg } from './types.js';
 import { formatGameLegLabel, formatTrackRaceLabel } from './format.js';
 import { classifyRaceProfile } from './raceProfile.js';
 import { formatStartMethodLabel } from './scoring.js';
+import {
+  formatLegTravClassHint,
+} from './travLeagueClasses.js';
 
 const DEFAULT_EMAIL = 'andersper.ek@gmail.com';
 const MAILTO_BODY_LIMIT = 1800;
@@ -41,6 +44,8 @@ function formatLegPlain(
   if (leg.trackName) lines.push(`Bana: ${leg.trackName}`);
   if (prepComment) lines.push(`Gardering: ${prepComment}`);
   if (spikeComment) lines.push(`Spik ettan? ${spikeComment}`);
+  const classHint = formatLegTravClassHint(leg.raceInfo?.name ?? null, leg.raceInfo?.terms ?? []);
+  if (classHint) lines.push(`Klass: ${classHint}`);
 
   const horses = leg.rankedHorses.slice(0, maxHorses);
   horses.forEach((horse) => {
@@ -141,10 +146,16 @@ function legTableHtml(
   }
   if (spike) meta.push(`Spik ${spike.rank}`);
 
+  const classHint = formatLegTravClassHint(leg.raceInfo?.name ?? null, leg.raceInfo?.terms ?? []);
+  const classHintHtml = classHint
+    ? `<p class="leg-class-hint"><strong>Klass:</strong> ${escapeHtml(classHint)}</p>`
+    : '';
+
   return `<section class="leg">
     <header class="leg-header">
       <h2>${escapeHtml(legHeading(game, leg))}</h2>
       ${meta.length > 0 ? `<p class="leg-meta">${meta.join(' · ')}</p>` : ''}
+      ${classHintHtml}
       ${prepComment ? `<p class="leg-prep-comment"><strong>Gardering inför lopp:</strong> ${escapeHtml(prepComment)}</p>` : ''}
       ${spikeComment ? `<p class="leg-spike-hint"><strong>Spik ettan?</strong> ${escapeHtml(spikeComment)}</p>` : ''}
     </header>
@@ -343,6 +354,19 @@ export function buildRankingHtmlDocument(
     }
     .leg-spike-hint strong {
       color: #15803d;
+    }
+    .leg-class-hint {
+      margin: 0.5rem 0 0;
+      padding: 0.65rem 0.85rem;
+      background: #faf5ff;
+      border: 1px solid #e9d5ff;
+      border-left: 4px solid #9333ea;
+      border-radius: 0 10px 10px 0;
+      font-size: 0.9rem;
+      line-height: 1.45;
+    }
+    .leg-class-hint strong {
+      color: #7e22ce;
     }
     @media print {
       body { background: #fff; }

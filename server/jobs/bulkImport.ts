@@ -59,15 +59,36 @@ export function getBulkImportStatus(db: Database.Database): BulkImportStatus {
 export function resetStaleBulkImportStatus(db: Database.Database) {
   if (importPromise) return;
   const stored = loadStoredStatus(db);
-  if (!stored?.running) return;
+  if (!stored) return;
 
-  liveStatus = {
-    ...stored,
-    running: false,
-    message: `${stored.message ?? 'Import avbruten'} (server omstartad)`,
-    finishedAt: new Date().toISOString(),
-  };
-  saveStatus(db, liveStatus);
+  if (stored.running) {
+    liveStatus = {
+      ...stored,
+      running: false,
+      message: `${stored.message ?? 'Import avbruten'} (server omstartad)`,
+      finishedAt: new Date().toISOString(),
+    };
+    saveStatus(db, liveStatus);
+    return;
+  }
+
+  if (stored.message?.includes('is not defined')) {
+    liveStatus = {
+      running: false,
+      atgTrackId: null,
+      trackName: null,
+      fromDate: null,
+      toDate: null,
+      total: 0,
+      done: 0,
+      imported: 0,
+      skipped: 0,
+      errors: [],
+      message: null,
+      finishedAt: null,
+    };
+    saveStatus(db, liveStatus);
+  }
 }
 
 async function runBulkImport(

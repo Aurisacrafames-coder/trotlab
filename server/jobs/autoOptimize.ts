@@ -1,9 +1,15 @@
 import type Database from 'better-sqlite3';
-import { listBacktestTracks, normalizeMaxTrials, optimizeWeights } from '../backtest.js';
+import {
+  listBacktestGameTypes,
+  listBacktestTracks,
+  normalizeMaxTrials,
+  optimizeWeights,
+} from '../backtest.js';
 import { getTrackProfileOrGlobal } from '../trackWeightProfiles.js';
 import { getTrackStats, resolveTrackName } from '../trackStats.js';
-import type { BacktestGoal, BacktestOptimizeResult } from '../../shared/types.js';
+import type { AutoOptimizerStatus, BacktestGoal, BacktestOptimizeResult } from '../../shared/types.js';
 import { DEFAULT_BACKTEST_GOAL } from '../../shared/types.js';
+import { normalizeProfileGameType } from '../../shared/trackProfileGameTypes.js';
 
 const META_RUNNING = 'auto_opt_running';
 const META_RESULT = 'auto_opt_result';
@@ -11,26 +17,14 @@ const META_STATUS = 'auto_opt_status';
 const AUTO_OPT_MAX_RACES = 150;
 const AUTO_OPT_BACKGROUND_TRIALS = 1500;
 
-function resultMetaKey(atgTrackId: number) {
-  return `${META_RESULT}_${atgTrackId}`;
+function resultMetaKey(atgTrackId: number, gameType?: string | null) {
+  const gt = normalizeProfileGameType(gameType);
+  return gt ? `${META_RESULT}_${atgTrackId}_${gt}` : `${META_RESULT}_${atgTrackId}_all`;
 }
 
-function statusMetaKey(atgTrackId: number) {
-  return `${META_STATUS}_${atgTrackId}`;
-}
-
-export interface AutoOptimizerStatus {
-  running: boolean;
-  atgTrackId: number | null;
-  trackName: string | null;
-  goal: BacktestGoal | null;
-  trialsRun: number;
-  bestHits: number | null;
-  racesWithResult: number | null;
-  phase: 'idle' | 'coarse' | 'fine' | 'restart' | 'done' | 'error';
-  lastResult: BacktestOptimizeResult | null;
-  lastRunAt: string | null;
-  message: string | null;
+function statusMetaKey(atgTrackId: number, gameType?: string | null) {
+  const gt = normalizeProfileGameType(gameType);
+  return gt ? `${META_STATUS}_${atgTrackId}_${gt}` : `${META_STATUS}_${atgTrackId}_all`;
 }
 
 function setMeta(db: Database.Database, key: string, value: string) {
@@ -51,6 +45,7 @@ let liveStatus: AutoOptimizerStatus = {
   running: false,
   atgTrackId: null,
   trackName: null,
+  gameType: null,
   goal: null,
   trialsRun: 0,
   bestHits: null,
@@ -64,26 +59,42 @@ let liveStatus: AutoOptimizerStatus = {
 let backgroundPromise: Promise<void> | null = null;
 let queuedRun = false;
 
+function racesWithResultForTrack(
+  db: Database.Database,
+  atgTrackId: number,
+  gameType?: string | null,
+): number {
+  const gt = normalizeProfileGameType(gameType);
+  if (!gt) {
+    return getTrackStats(db, atgTrackId)?.racesWithResult ?? 0;
+  }
+  const row = listBacktestGameTypes(db, atgTrackId).find((g) => g.gameType === gt);
+  return row?.racesWithResult ?? 0;
+}
+
 function pickPrimaryTrack(db: Database.Database) {
   const tracks = listBacktestTracks(db).filter((t) => t.racesWithResult >= 3);
   if (tracks.length === 0) return null;
   return tracks.sort((a, b) => b.racesWithResult - a.racesWithResult)[0] ?? null;
 }
 
-function resolveTrack(db: Database.Database, atgTrackId?: number | null) {
+function resolveTrack(db: Database.Database, atgTrackId?: number | null, gameType?: string | null) {
   const tracks = listBacktestTracks(db);
   if (atgTrackId != null) {
     const selected = tracks.find((t) => t.atgTrackId === atgTrackId);
     if (!selected) {
       return { track: null, error: 'Banan saknar importerade lopp i databasen.' };
     }
-    if (selected.racesWithResult < 3) {
+    const racesWithResult = racesWithResultForTrack(db, selected.atgTrackId, gameType);
+    if (racesWithResult < 3) {
+      const gtLabel = normalizeProfileGameType(gameType);
+      const scope = gtLabel ? ` för ${gtLabel}` : '';
       return {
         track: null,
-        error: `${selected.trackName} har bara ${selected.racesWithResult} lopp med resultat — importera minst 3 för optimering.`,
+        error: `${selected.trackName}${scope} har bara ${racesWithResult} lopp med resultat — importera minst 3 för optimering.`,
       };
     }
-    return { track: selected, error: null };
+    return { track: { ...selected, racesWithResult }, error: null };
   }
   const primary = pickPrimaryTrack(db);
   if (!primary) {
@@ -98,10 +109,14 @@ function resolveTrack(db: Database.Database, atgTrackId?: number | null) {
 function parseStoredResult(
   raw: string,
   expectedTrackId?: number | null,
+  expectedGameType?: string | null,
 ): BacktestOptimizeResult | null {
   try {
     const result = JSON.parse(raw) as BacktestOptimizeResult;
     if (expectedTrackId != null && result.atgTrackId !== expectedTrackId) return null;
+    const expectedGt = normalizeProfileGameType(expectedGameType);
+    const resultGt = normalizeProfileGameType(result.gameType);
+    if (expectedTrackId != null && expectedGt !== resultGt) return null;
     return result;
   } catch {
     return null;
@@ -123,15 +138,21 @@ function loadLegacyResult(db: Database.Database): BacktestOptimizeResult | null 
   return result ? normalizeStoredResult(db, result) : null;
 }
 
-function loadStoredResult(db: Database.Database, atgTrackId?: number | null): BacktestOptimizeResult | null {
+function loadStoredResult(
+  db: Database.Database,
+  atgTrackId?: number | null,
+  gameType?: string | null,
+): BacktestOptimizeResult | null {
   if (atgTrackId != null) {
-    const perTrack = getMeta(db, resultMetaKey(atgTrackId));
-    if (perTrack) {
-      const result = parseStoredResult(perTrack, atgTrackId);
-      return result ? normalizeStoredResult(db, result) : null;
+    const perScope = getMeta(db, resultMetaKey(atgTrackId, gameType));
+    if (perScope) {
+      const result = parseStoredResult(perScope, atgTrackId, gameType);
+      if (result) return normalizeStoredResult(db, result);
     }
     const legacy = loadLegacyResult(db);
-    if (legacy?.atgTrackId === atgTrackId) return legacy;
+    if (legacy?.atgTrackId === atgTrackId && !normalizeProfileGameType(gameType)) {
+      return legacy;
+    }
     return null;
   }
 
@@ -141,8 +162,9 @@ function loadStoredResult(db: Database.Database, atgTrackId?: number | null): Ba
 export function getStoredOptimizeResult(
   db: Database.Database,
   atgTrackId: number,
+  gameType?: string | null,
 ): BacktestOptimizeResult | null {
-  return loadStoredResult(db, atgTrackId);
+  return loadStoredResult(db, atgTrackId, gameType);
 }
 
 function idleStatus(
@@ -153,6 +175,7 @@ function idleStatus(
     running: false,
     atgTrackId: null,
     trackName: null,
+    gameType: null,
     goal: null,
     trialsRun: 0,
     bestHits: null,
@@ -168,15 +191,23 @@ function idleStatus(
 export function getAutoOptimizerStatus(
   db: Database.Database,
   filterTrackId?: number | null,
+  filterGameType?: string | null,
 ): AutoOptimizerStatus {
+  const filterGt = normalizeProfileGameType(filterGameType);
+
   if (liveStatus.running) {
-    if (filterTrackId == null || liveStatus.atgTrackId === filterTrackId) {
+    const sameTrack = filterTrackId == null || liveStatus.atgTrackId === filterTrackId;
+    const sameGameType =
+      filterTrackId == null ||
+      normalizeProfileGameType(liveStatus.gameType) === filterGt;
+    if (sameTrack && sameGameType) {
       return liveStatus;
     }
     return idleStatus(db, {
       running: true,
       atgTrackId: liveStatus.atgTrackId,
       trackName: liveStatus.trackName,
+      gameType: liveStatus.gameType,
       goal: liveStatus.goal,
       trialsRun: liveStatus.trialsRun,
       bestHits: liveStatus.bestHits,
@@ -187,27 +218,29 @@ export function getAutoOptimizerStatus(
   }
 
   if (filterTrackId != null) {
-    const stored = loadStoredResult(db, filterTrackId);
+    const stored = loadStoredResult(db, filterTrackId, filterGameType);
     const track = getTrackStats(db, filterTrackId);
     const trackName = resolveTrackName(db, filterTrackId) ?? track?.trackName ?? null;
     if (stored) {
       return idleStatus(db, {
         atgTrackId: stored.atgTrackId,
         trackName: stored.trackName,
+        gameType: normalizeProfileGameType(stored.gameType) || null,
         goal: stored.goal,
         bestHits: stored.optimized.hits,
         racesWithResult: stored.racesWithResult,
         phase: 'done',
         lastResult: stored,
-        lastRunAt: getMeta(db, statusMetaKey(filterTrackId)) ?? getMeta(db, META_STATUS),
+        lastRunAt: getMeta(db, statusMetaKey(filterTrackId, filterGameType)) ?? getMeta(db, META_STATUS),
         message: stored.message,
       });
     }
     return idleStatus(db, {
       atgTrackId: filterTrackId,
       trackName,
+      gameType: filterGt || null,
       message: trackName
-        ? `Ingen optimering sparad för ${trackName} ännu.`
+        ? `Ingen optimering sparad för ${trackName}${filterGt ? ` (${filterGt})` : ''} ännu.`
         : 'Ingen optimering sparad för denna bana ännu.',
     });
   }
@@ -219,6 +252,7 @@ export function getAutoOptimizerStatus(
     lastRunAt,
     atgTrackId: stored?.atgTrackId ?? liveStatus.atgTrackId,
     trackName: stored?.trackName ?? liveStatus.trackName,
+    gameType: normalizeProfileGameType(stored?.gameType) || liveStatus.gameType,
     goal: stored?.goal ?? liveStatus.goal,
     phase: stored ? 'done' : 'idle',
     message: stored?.message ?? liveStatus.message,
@@ -229,20 +263,24 @@ async function runAutoOptimize(
   db: Database.Database,
   goal: BacktestGoal = DEFAULT_BACKTEST_GOAL,
   atgTrackId?: number | null,
+  gameType?: string | null,
   maxTrials?: number,
+  startMethod?: 'auto' | 'volte' | null,
 ) {
-  const { track, error } = resolveTrack(db, atgTrackId);
+  const normalizedGameType = normalizeProfileGameType(gameType);
+  const { track, error } = resolveTrack(db, atgTrackId, gameType);
   if (!track) {
     liveStatus = {
       running: false,
       atgTrackId: atgTrackId ?? null,
       trackName: null,
+      gameType: normalizedGameType || null,
       goal,
       trialsRun: 0,
       bestHits: null,
       racesWithResult: null,
       phase: 'idle',
-      lastResult: loadStoredResult(db),
+      lastResult: loadStoredResult(db, atgTrackId, gameType),
       lastRunAt: getMeta(db, META_STATUS),
       message: error,
     };
@@ -251,25 +289,33 @@ async function runAutoOptimize(
 
   setMeta(db, META_RUNNING, '1');
   const trialLimit = normalizeMaxTrials(maxTrials);
+  const scopeLabel = normalizedGameType ? `${track.trackName} (${normalizedGameType})` : track.trackName;
   liveStatus = {
     running: true,
     atgTrackId: track.atgTrackId,
     trackName: track.trackName,
+    gameType: normalizedGameType || null,
     goal,
     trialsRun: 0,
     bestHits: null,
     racesWithResult: track.racesWithResult,
     phase: 'coarse',
-    lastResult: loadStoredResult(db),
+    lastResult: loadStoredResult(db, track.atgTrackId, gameType),
     lastRunAt: getMeta(db, META_STATUS),
-    message: `Testar viktkombinationer mot ${track.trackName} (max ${trialLimit.toLocaleString('sv-SE')} försök)…`,
+    message: `Testar viktkombinationer mot ${scopeLabel} (max ${trialLimit.toLocaleString('sv-SE')} försök)…`,
+  };
+
+  const filter = {
+    atgTrackId: track.atgTrackId,
+    gameType: normalizedGameType || undefined,
+    startMethod: startMethod ?? undefined,
   };
 
   try {
     const result = await optimizeWeights(
       db,
-      getTrackProfileOrGlobal(db, track.atgTrackId),
-      { atgTrackId: track.atgTrackId },
+      getTrackProfileOrGlobal(db, track.atgTrackId, normalizedGameType || null),
+      filter,
       goal,
       {
         maxTrials: trialLimit,
@@ -287,8 +333,8 @@ async function runAutoOptimize(
       },
     );
 
-    setMeta(db, resultMetaKey(track.atgTrackId), JSON.stringify(result));
-    setMeta(db, statusMetaKey(track.atgTrackId), new Date().toISOString());
+    setMeta(db, resultMetaKey(track.atgTrackId, gameType), JSON.stringify(result));
+    setMeta(db, statusMetaKey(track.atgTrackId, gameType), new Date().toISOString());
     setMeta(db, META_RESULT, JSON.stringify(result));
     setMeta(db, META_STATUS, new Date().toISOString());
 
@@ -296,6 +342,7 @@ async function runAutoOptimize(
       running: false,
       atgTrackId: track.atgTrackId,
       trackName: track.trackName,
+      gameType: normalizedGameType || null,
       goal,
       trialsRun: result.trialsRun,
       bestHits: result.optimized.hits,
@@ -310,12 +357,13 @@ async function runAutoOptimize(
       running: false,
       atgTrackId: track.atgTrackId,
       trackName: track.trackName,
+      gameType: normalizedGameType || null,
       goal,
       trialsRun: liveStatus.trialsRun,
       bestHits: liveStatus.bestHits,
       racesWithResult: track.racesWithResult,
       phase: 'error',
-      lastResult: loadStoredResult(db),
+      lastResult: loadStoredResult(db, track.atgTrackId, gameType),
       lastRunAt: getMeta(db, META_STATUS),
       message: err instanceof Error ? err.message : 'Automatisk optimering misslyckades.',
     };
@@ -329,9 +377,14 @@ export function scheduleAutoOptimize(
   goal: BacktestGoal = DEFAULT_BACKTEST_GOAL,
   atgTrackId?: number | null,
   maxTrials?: number,
-  options?: { allowLargeTrack?: boolean },
+  options?: {
+    allowLargeTrack?: boolean;
+    gameType?: string | null;
+    startMethod?: 'auto' | 'volte' | null;
+  },
 ) {
-  const { track, error } = resolveTrack(db, atgTrackId);
+  const gameType = options?.gameType;
+  const { track, error } = resolveTrack(db, atgTrackId, gameType);
   if (!track) {
     if (error) console.log(`Auto-optimering hoppades över: ${error}`);
     return;
@@ -350,13 +403,20 @@ export function scheduleAutoOptimize(
     return;
   }
 
-  backgroundPromise = runAutoOptimize(db, goal, atgTrackId, trialLimit)
+  backgroundPromise = runAutoOptimize(
+    db,
+    goal,
+    atgTrackId,
+    gameType,
+    trialLimit,
+    options?.startMethod,
+  )
     .catch((err) => console.error('Automatisk optimering misslyckades:', err))
     .finally(() => {
       backgroundPromise = null;
       if (queuedRun) {
         queuedRun = false;
-        scheduleAutoOptimize(db, goal, atgTrackId, maxTrials);
+        scheduleAutoOptimize(db, goal, atgTrackId, maxTrials, options);
       }
     });
 }

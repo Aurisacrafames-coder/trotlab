@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { Parameter } from '../shared/types.js';
-import { getTrackProfileParameters } from './trackWeightProfiles.js';
+import { resolveTrackProfileParameters } from './trackWeightProfiles.js';
 
 export function getParameters(db: Database.Database): Parameter[] {
   return db
@@ -29,10 +29,12 @@ export function getScoringProfileSource(
 ): ScoringProfileSource {
   const session = db
     .prepare(
-      `SELECT uses_tip_parameters as usesTip, atg_track_id as atgTrackId
+      `SELECT uses_tip_parameters as usesTip, atg_track_id as atgTrackId, game_type as gameType
        FROM race_sessions WHERE id = ?`,
     )
-    .get(sessionId) as { usesTip: number; atgTrackId: number | null } | undefined;
+    .get(sessionId) as
+    | { usesTip: number; atgTrackId: number | null; gameType: string }
+    | undefined;
 
   if (session?.usesTip) {
     const tipParams = getSessionTipParameters(db, sessionId);
@@ -40,10 +42,7 @@ export function getScoringProfileSource(
   }
 
   if (session?.atgTrackId != null) {
-    const trackProfile = db
-      .prepare(`SELECT 1 FROM track_profile_meta WHERE atg_track_id = ?`)
-      .get(session.atgTrackId);
-    if (trackProfile) return 'track';
+    if (resolveTrackProfileParameters(db, session.atgTrackId, session.gameType)) return 'track';
   }
 
   return 'global';
@@ -62,10 +61,12 @@ export function getSessionTipParameters(db: Database.Database, sessionId: number
 export function getScoringParameters(db: Database.Database, sessionId: number): Parameter[] {
   const session = db
     .prepare(
-      `SELECT uses_tip_parameters as usesTip, atg_track_id as atgTrackId
+      `SELECT uses_tip_parameters as usesTip, atg_track_id as atgTrackId, game_type as gameType
        FROM race_sessions WHERE id = ?`,
     )
-    .get(sessionId) as { usesTip: number; atgTrackId: number | null } | undefined;
+    .get(sessionId) as
+    | { usesTip: number; atgTrackId: number | null; gameType: string }
+    | undefined;
 
   if (session?.usesTip) {
     const tipParams = getSessionTipParameters(db, sessionId);
@@ -73,7 +74,7 @@ export function getScoringParameters(db: Database.Database, sessionId: number): 
   }
 
   if (session?.atgTrackId != null) {
-    const trackProfile = getTrackProfileParameters(db, session.atgTrackId);
+    const trackProfile = resolveTrackProfileParameters(db, session.atgTrackId, session.gameType);
     if (trackProfile) {
       return mergeParametersWithGlobal(trackProfile, getParameters(db));
     }
