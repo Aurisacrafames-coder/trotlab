@@ -9,7 +9,12 @@ import type {
   BacktestTrackOption,
   Parameter,
 } from '../shared/types.js';
-import { normalizeProfileGameType } from '../shared/trackProfileGameTypes.js';
+import {
+  expectedLegsInGame,
+  isMultiTrackGameType,
+  normalizeProfileGameType,
+} from '../shared/trackProfileGameTypes.js';
+import { knownTrackNameById } from '../shared/tracks.js';
 import { OPTIMIZE_TRIALS_DEFAULT, VARMNING_PARAMETER_ID } from '../shared/types.js';
 import { listTrackStats, resolveTrackName } from './trackStats.js';
 
@@ -277,6 +282,22 @@ async function fillRemainingTrials(
   return { best: localBest, weights: localWeights };
 }
 
+function completeMultiTrackGameSessionIds(
+  db: Database.Database,
+  fullLegCount: number,
+): number[] {
+  const rows = db
+    .prepare(
+      `SELECT game_session_id as gameSessionId
+       FROM race_sessions
+       WHERE game_session_id IS NOT NULL
+       GROUP BY game_session_id
+       HAVING COUNT(*) >= ?`,
+    )
+    .all(fullLegCount) as Array<{ gameSessionId: number }>;
+  return rows.map((r) => r.gameSessionId);
+}
+
 function loadSessions(db: Database.Database, filter: BacktestFilter): SessionRow[] {
   let sql = `
     SELECT id, date, game_type as gameType, leg_number as legNumber,
@@ -285,7 +306,7 @@ function loadSessions(db: Database.Database, filter: BacktestFilter): SessionRow
     FROM race_sessions
     WHERE atg_track_id = ?
   `;
-  const args: Array<number | string> = [filter.atgTrackId];
+  const args: Array<number | string | number[]> = [filter.atgTrackId];
 
   if (filter.startMethod) {
     sql += ` AND start_method = ?`;
@@ -299,10 +320,43 @@ function loadSessions(db: Database.Database, filter: BacktestFilter): SessionRow
   if (filter.gameSessionId != null) {
     sql += ` AND game_session_id = ?`;
     args.push(filter.gameSessionId);
+  } else if (gameType && isMultiTrackGameType(gameType)) {
+    const fullLegs = expectedLegsInGame(gameType)!;
+    const completeIds = completeMultiTrackGameSessionIds(db, fullLegs);
+    if (completeIds.length === 0) {
+      sql += ` AND game_session_id IS NULL`;
+    } else {
+      const placeholders = completeIds.map(() => '?').join(',');
+      sql += ` AND (game_session_id IS NULL OR game_session_id IN (${placeholders}))`;
+      args.push(...completeIds);
+    }
   }
 
   sql += ` ORDER BY date, leg_number`;
   return db.prepare(sql).all(...args) as SessionRow[];
+}
+
+function partnerTrackNamesForGameType(
+  db: Database.Database,
+  atgTrackId: number,
+  gameType: string,
+): string[] {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT rs2.atg_track_id as atgTrackId
+       FROM race_sessions rs1
+       JOIN race_sessions rs2 ON rs1.game_session_id = rs2.game_session_id
+       WHERE rs1.atg_track_id = ?
+         AND rs1.game_type = ?
+         AND rs1.game_session_id IS NOT NULL
+         AND rs2.atg_track_id IS NOT NULL
+         AND rs2.atg_track_id != ?`,
+    )
+    .all(atgTrackId, gameType, atgTrackId) as Array<{ atgTrackId: number }>;
+
+  return rows
+    .map((r) => knownTrackNameById(r.atgTrackId))
+    .filter((name): name is string => Boolean(name));
 }
 
 function loadEntryScores(
@@ -513,11 +567,39 @@ export function listBacktestGameTypes(
     racesWithResult: number | null;
   }>;
 
-  return rows.map((row) => ({
-    gameType: row.gameType,
-    raceCount: row.raceCount,
-    racesWithResult: row.racesWithResult ?? 0,
-  }));
+  return rows.map((row) => {
+    const normalized = normalizeProfileGameType(row.gameType);
+    const fullLegs = expectedLegsInGame(normalized);
+    const multi = fullLegs != null;
+    const partners = multi ? partnerTrackNamesForGameType(db, atgTrackId, normalized) : [];
+    let raceCount = row.raceCount;
+    let racesWithResult = row.racesWithResult ?? 0;
+    if (multi) {
+      const sessions = loadSessions(db, { atgTrackId, gameType: normalized });
+      raceCount = sessions.length;
+      const sessionIds = new Set(sessions.map((s) => s.id));
+      if (sessionIds.size > 0) {
+        const placeholders = [...sessionIds].map(() => '?').join(',');
+        const withResult = db
+          .prepare(
+            `SELECT COUNT(*) as c FROM race_sessions
+             WHERE id IN (${placeholders}) AND status = 'results'`,
+          )
+          .get(...sessionIds) as { c: number };
+        racesWithResult = withResult.c;
+      } else {
+        racesWithResult = 0;
+      }
+    }
+    return {
+      gameType: row.gameType,
+      raceCount,
+      racesWithResult,
+      isMultiTrack: multi && partners.length > 0,
+      legsPerFullGame: fullLegs ?? undefined,
+      partnerTrackNames: partners.length > 0 ? partners : undefined,
+    };
+  });
 }
 
 export function runBacktest(

@@ -402,6 +402,10 @@ export interface BacktestGameTypeOption {
   gameType: string;
   raceCount: number;
   racesWithResult: number;
+  /** T.ex. V86 — avdelningar på andra banor i samma omgång. */
+  isMultiTrack?: boolean;
+  legsPerFullGame?: number;
+  partnerTrackNames?: string[];
 }
 
 /** How far back bulk track import fetches finished races for backtest/optimization. */

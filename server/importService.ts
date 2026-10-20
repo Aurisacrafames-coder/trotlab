@@ -16,6 +16,7 @@ import {
   prefetchImportStats,
   prefetchImportStatsForSessions,
 } from './atgStats.js';
+import { venueFromTrackIds } from '../shared/gameVenue.js';
 import { findOrCreateGameSession, linkRaceToGameSession } from './gameSessions.js';
 import { recalculateSessionScores } from './sessionScores.js';
 import { invalidateTrackStatsCache } from './trackStats.js';
@@ -45,12 +46,14 @@ function* dateRange(from: string, to: string): Generator<string> {
 
 function loadRaceStatusFromCalendar(
   calendar: { tracks?: Array<{ id: number; races?: Array<{ id: string; status?: string }> }> },
-  trackId: number,
+  trackIds: number[],
 ): Map<string, string | undefined> {
   const map = new Map<string, string | undefined>();
-  const track = calendar.tracks?.find((t) => t.id === trackId);
-  for (const race of track?.races ?? []) {
-    map.set(race.id, race.status);
+  for (const trackId of trackIds) {
+    const track = calendar.tracks?.find((t) => t.id === trackId);
+    for (const race of track?.races ?? []) {
+      map.set(race.id, race.status);
+    }
   }
   return map;
 }
@@ -126,7 +129,7 @@ export async function discoverTrackLegsForRange(options: {
 
   for (const date of dateRange(fromDate, rangeEnd)) {
     let calendar: {
-      games?: Record<string, Array<{ id: string; races: string[] }>>;
+      games?: Record<string, Array<{ id: string; races: string[]; tracks?: number[] }>>;
     };
     try {
       calendar = await atgFetch(`/calendar/day/${date}`);
@@ -134,12 +137,18 @@ export async function discoverTrackLegsForRange(options: {
       continue;
     }
 
-    const raceStatusById = loadRaceStatusFromCalendar(calendar, trackId);
-
     for (const gameType of gameTypes) {
       const games = calendar.games?.[gameType] ?? calendar.games?.[gameType.toUpperCase()] ?? [];
       for (const game of games) {
         if (!game.id.includes(`_${trackId}_`) && !game.tracks?.includes(trackId)) continue;
+
+        const gameTrackIds =
+          game.tracks?.length && game.tracks.includes(trackId) ? game.tracks : [trackId];
+        const raceStatusById = loadRaceStatusFromCalendar(calendar, gameTrackIds);
+        const urlVenueSlug =
+          gameTrackIds.length > 1
+            ? venueFromTrackIds(gameTrackIds).venueSlug
+            : trackSlug;
 
         for (let leg = 1; leg <= game.races.length; leg++) {
           const raceId = game.races[leg - 1];
@@ -162,7 +171,7 @@ export async function discoverTrackLegsForRange(options: {
 
           seenRaceIds.add(raceId);
           targets.push({
-            url: `https://www.atg.se/spel/${date}/${gameType}/${trackSlug}/avd/${leg}`,
+            url: `https://www.atg.se/spel/${date}/${gameType}/${urlVenueSlug}/avd/${leg}`,
             date,
             gameType,
             leg,

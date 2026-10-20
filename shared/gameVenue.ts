@@ -69,7 +69,7 @@ export function venueMatchesGameTracks(venue: GameVenue, gameTracks: number[] | 
   return venue.trackIds.every((id) => trackSet.has(id));
 }
 
-function venueFromTrackIds(trackIds: number[]): GameVenue {
+export function venueFromTrackIds(trackIds: number[]): GameVenue {
   const slugs: string[] = [];
   const names: string[] = [];
   for (const id of trackIds) {

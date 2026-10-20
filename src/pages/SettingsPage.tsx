@@ -279,6 +279,14 @@ function BacktestPanel({
       ? selectedTrack?.racesWithResult ?? 0
       : gameTypeOptions.find((g) => g.gameType === optimizeGameType)?.racesWithResult ?? 0;
   const canOptimize = atgTrackId !== '' && scopedRacesWithResult >= 3;
+  const selectedGameTypeStats = gameTypeOptions.find((g) => g.gameType === optimizeGameType);
+  const multiTrackHint =
+    selectedGameTypeStats?.isMultiTrack && selectedGameTypeStats.partnerTrackNames?.length
+      ? `${optimizeGameType} körs på två banor i samma omgång (${selectedGameTypeStats.partnerTrackNames.join(', ')}). ` +
+        `Optimering och sparad profil gäller bara avdelningar på ${workingTrackName ?? 'banan'} ` +
+        `(ca ${Math.floor((selectedGameTypeStats.legsPerFullGame ?? 8) / 2)} av ${selectedGameTypeStats.legsPerFullGame ?? 8} per omgång). ` +
+        `Skapa även profil och optimera partnerbanan separat.`
+      : null;
   const filterBody = {
     atgTrackId: Number(atgTrackId),
     startMethod: startMethod || null,
@@ -490,6 +498,12 @@ function BacktestPanel({
               </select>
             </label>
           </div>
+
+          {multiTrackHint && (
+            <p className="muted backtest-warn" style={{ marginTop: '-0.25rem' }}>
+              {multiTrackHint}
+            </p>
+          )}
 
           {(() => {
             const selected = OPTIMIZE_TRIAL_OPTIONS.find((o) => o.value === maxTrials);

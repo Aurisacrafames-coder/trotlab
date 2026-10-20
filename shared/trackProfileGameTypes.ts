@@ -19,3 +19,20 @@ export function formatProfileGameTypeLabel(gameType: string): string {
   if (!normalized) return 'Alla spelformer';
   return normalized;
 }
+
+/** Antal avdelningar i en full ATG-omgång (dubbelbanor delar på dessa). */
+export const MULTI_TRACK_GAME_LEG_COUNTS: Record<string, number> = {
+  V86: 8,
+  V85: 8,
+  GS75: 7,
+};
+
+export function expectedLegsInGame(gameType: string): number | null {
+  const key = normalizeProfileGameType(gameType);
+  if (!key) return null;
+  return MULTI_TRACK_GAME_LEG_COUNTS[key] ?? null;
+}
+
+export function isMultiTrackGameType(gameType: string): boolean {
+  return expectedLegsInGame(gameType) != null;
+}
