@@ -4,6 +4,7 @@ import {
   fetchAutoOptimizerStatus,
   fetchBacktestGameTypes,
   fetchBacktestTracks,
+  refreshBacktestTrackResults,
   fetchKnownTracks,
   fetchParameters,
   fetchTrackProfile,
@@ -204,6 +205,7 @@ function BacktestPanel({
   const [optimizeResult, setOptimizeResult] = useState<BacktestOptimizeResult | null>(null);
   const [autoStatus, setAutoStatus] = useState<AutoOptimizerStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [refreshingResults, setRefreshingResults] = useState(false);
 
   useEffect(() => {
     fetchBacktestTracks()
@@ -293,6 +295,27 @@ function BacktestPanel({
     gameType: optimizeGameType || null,
     goal,
   };
+
+  async function handleRefreshResults() {
+    if (atgTrackId === '') return;
+    setRefreshingResults(true);
+    setError(null);
+    try {
+      const summary = await refreshBacktestTrackResults({
+        atgTrackId: Number(atgTrackId),
+        gameType: optimizeGameType || null,
+      });
+      const list = await fetchBacktestGameTypes(Number(atgTrackId));
+      setGameTypeOptions(list);
+      if (summary.updated === 0 && summary.scanned === 0) {
+        setError('Inga inaktuella lopp hittades att uppdatera — kör historikimport om spelformen saknas.');
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Kunde inte uppdatera resultat');
+    } finally {
+      setRefreshingResults(false);
+    }
+  }
 
   async function handleRun() {
     if (atgTrackId === '') return;
@@ -533,6 +556,27 @@ function BacktestPanel({
                 : 'Optimera vikter'}
             </button>
           </div>
+
+          {!canOptimize &&
+            selectedTrack &&
+            scopedRacesWithResult === 0 &&
+            (selectedGameTypeStats?.raceCount ?? 0) > 0 && (
+              <p className="backtest-warn">
+                {optimizeGameType || 'Spelformen'} har {selectedGameTypeStats?.raceCount} importerade
+                lopp på {workingTrackName ?? 'banan'}, men{' '}
+                <strong>0 med resultat</strong> i databasen (t.ex. importerade som kommande).
+                {' '}
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={handleRefreshResults}
+                  disabled={refreshingResults || running || optimizing}
+                >
+                  {refreshingResults ? 'Hämtar resultat…' : 'Uppdatera resultat från ATG'}
+                </button>
+                {' '}eller importera fler avslutade omgångar under Importera.
+              </p>
+            )}
 
           {!canOptimize && selectedTrack && scopedRacesWithResult > 0 && scopedRacesWithResult < 3 && (
             <p className="backtest-warn">

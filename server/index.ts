@@ -26,6 +26,7 @@ import {
   optimizeWeights,
   runBacktest,
 } from './backtest.js';
+import { refreshTrackRaceResults } from './resultRefresh.js';
 import { analyzeTrackMisses } from './trackMissAnalysis.js';
 import { buildGameRankingExport } from './rankingExportService.js';
 import { refreshAllGameSessionRaceInfo } from './raceInfoRefresh.js';
@@ -1005,6 +1006,20 @@ app.get('/api/backtest/game-types', (req, res) => {
     return res.status(400).json({ error: 'atgTrackId krävs' });
   }
   res.json(listBacktestGameTypes(getDb(), atgTrackId));
+});
+
+app.post('/api/backtest/refresh-results', async (req, res) => {
+  const { atgTrackId, gameType } = req.body as { atgTrackId?: number; gameType?: string | null };
+  if (atgTrackId == null || !Number.isFinite(atgTrackId)) {
+    return res.status(400).json({ error: 'atgTrackId krävs' });
+  }
+  try {
+    const summary = await refreshTrackRaceResults(getDb(), { atgTrackId, gameType });
+    res.json(summary);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Kunde inte uppdatera resultat';
+    res.status(500).json({ error: message });
+  }
 });
 
 app.post('/api/backtest/miss-analysis', (req, res) => {

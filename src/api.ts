@@ -257,6 +257,19 @@ export const syncTrackStats = () =>
 export const fetchBacktestTracks = () => api<BacktestTrackOption[]>('/backtest/tracks');
 export const fetchBacktestGameTypes = (atgTrackId: number) =>
   api<BacktestGameTypeOption[]>(`/backtest/game-types?atgTrackId=${atgTrackId}`);
+
+export const refreshBacktestTrackResults = (body: {
+  atgTrackId: number;
+  gameType?: string | null;
+}) =>
+  api<{
+    atgTrackId: number;
+    gameType: string | null;
+    scanned: number;
+    updated: number;
+    skipped: number;
+    errors: string[];
+  }>('/backtest/refresh-results', { method: 'POST', body: JSON.stringify(body) });
 export const fetchTrackMissAnalysis = (body: { atgTrackId: number; goal: BacktestGoal }) =>
   api<TrackMissAnalysis>('/backtest/miss-analysis', { method: 'POST', body: JSON.stringify(body) });
 export const runBacktest = (body: {
