@@ -114,7 +114,10 @@ function buildPrepForGame(db: Database.Database, game: GameSession) {
 
   const analysisByTrack = new Map<number, TrackMissAnalysis>();
   for (const trackId of trackIds) {
-    analysisByTrack.set(trackId, analyzeTrackMisses(db, trackId, DEFAULT_BACKTEST_GOAL));
+    analysisByTrack.set(
+      trackId,
+      analyzeTrackMisses(db, trackId, DEFAULT_BACKTEST_GOAL, { gameType: game.gameType }),
+    );
   }
 
   const legPrepComments = new Map<number, string>();

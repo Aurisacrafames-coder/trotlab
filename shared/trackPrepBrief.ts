@@ -139,8 +139,13 @@ export function buildTrackPrepBriefSections(
     return sections;
   }
 
+  const scopeNote =
+    gameType && analysis.byGameType.length <= 1
+      ? ` (viktprofil och historik: ${gameType})`
+      : '';
+
   sections.push({
-    title: `Bananalys — ${analysis.trackName}`,
+    title: `Bananalys — ${analysis.trackName}${scopeNote}`,
     lines: [
       `${analysis.hits}/${analysis.racesWithResult} ${goalLabel(analysis.goal)} (${analysis.hitRate ?? '—'}%).`,
       `${analysis.misses} missade lopp i historiken.`,
@@ -148,7 +153,8 @@ export function buildTrackPrepBriefSections(
     ],
   });
 
-  const gameSection = gameTypeSection(analysis, gameType);
+  const gameSection =
+    gameType && analysis.byGameType.length <= 1 ? null : gameTypeSection(analysis, gameType);
   if (gameSection) sections.push(gameSection);
 
   const gardering = garderingLines(analysis);

@@ -7,6 +7,7 @@ import { runBacktest } from './backtest.js';
 import { getStoredOptimizeResult } from './jobs/autoOptimize.js';
 import { getTrackProfileOrGlobal, hasTrackProfile } from './trackWeightProfiles.js';
 import { resolveTrackName } from './trackStats.js';
+import { normalizeProfileGameType } from '../shared/trackProfileGameTypes.js';
 
 interface SessionMeta {
   id: number;
@@ -254,9 +255,16 @@ export function analyzeTrackMisses(
   db: Database.Database,
   atgTrackId: number,
   goal: BacktestGoal,
+  options?: { gameType?: string | null },
 ): TrackMissAnalysis {
-  const parameters = getTrackProfileOrGlobal(db, atgTrackId);
-  const summary = runBacktest(db, parameters, { atgTrackId }, goal);
+  const scopedGameType = normalizeProfileGameType(options?.gameType);
+  const parameters = getTrackProfileOrGlobal(db, atgTrackId, scopedGameType || null);
+  const summary = runBacktest(
+    db,
+    parameters,
+    scopedGameType ? { atgTrackId, gameType: scopedGameType } : { atgTrackId },
+    goal,
+  );
   const trackName = resolveTrackName(db, atgTrackId) ?? summary.trackName;
   const meta = loadSessionMeta(
     db,
@@ -357,7 +365,7 @@ export function analyzeTrackMisses(
   const topPickWin = buildTopPickWinAnalysis(topPickWinRows);
 
   const misses = summary.racesWithResult - summary.hits;
-  const storedOptimize = getStoredOptimizeResult(db, atgTrackId);
+  const storedOptimize = getStoredOptimizeResult(db, atgTrackId, scopedGameType || undefined);
 
   const result: TrackMissAnalysis = {
     atgTrackId,
@@ -368,7 +376,7 @@ export function analyzeTrackMisses(
     hits: summary.hits,
     misses,
     hitRate: summary.hitRate,
-    usesTrackProfile: hasTrackProfile(db, atgTrackId),
+    usesTrackProfile: hasTrackProfile(db, atgTrackId, scopedGameType || null),
     byStartMethod,
     byDistance,
     byGameType,
